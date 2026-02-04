@@ -1,0 +1,50 @@
+"$schema" = "node_modules/wrangler/config-schema.json"
+# For more details on how to configure Wrangler, refer to:
+# https://developers.cloudflare.com/workers/wrangler/configuration/
+
+name = "tong"
+compatibility_date = "2025-09-27"
+main = "server/index.ts"
+
+[[routes]]
+pattern = "tong.timothylin.me"
+custom_domain = true
+
+[assets]
+directory = "dist"
+not_found_handling = "single-page-application"
+
+[observability]
+enabled = true
+
+[durable_objects]
+bindings = [
+  { name = "LEXICON", class_name = "Lexicon" }
+]
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Lexicon"]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "tong"
+database_id = "86ec722c-cec2-45ea-8f2b-5ea45197e33c"
+
+[[r2_buckets]]
+bucket_name = "tong-documents"
+binding = "DOCUMENTS"
+
+[[workflows]]
+name = "ingest-document"
+binding = "INGEST_DOCUMENT_WORKFLOW"
+class_name = "IngestDocumentWorkflow"
+
+[[vectorize]]
+binding = "CHUNK_VECTORS"
+index_name = "tong-doc-chunks"
+remote = true
+
+[ai]
+binding = "AI"
+remote = true

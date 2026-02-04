@@ -10,11 +10,16 @@
 		"build-only": "vite build",
 		"type-check": "vue-tsc --build",
 		"deploy": "npm run build && wrangler deploy",
-		"cf-typegen": "wrangler types"
+		"cf-typegen": "wrangler types",
+		"test": "vitest --config vitest.config.ts"
 	},
 	"dependencies": {
+		"@mdi/font": "^7.4.47",
+		"hono": "^4.11.7",
+		"marked": "^17.0.1",
 		"vue": "^3.5.26",
-		"vue-router": "^4.6.4"
+		"vue-router": "^4.6.4",
+		"vuetify": "^3.11.8"
 	},
 	"devDependencies": {
 		"@cloudflare/vite-plugin": "^1.22.0",
@@ -26,8 +31,9 @@
 		"typescript": "~5.9.3",
 		"vite": "^7.3.1",
 		"vite-plugin-vue-devtools": "^8.0.5",
+		"vitest": "^4.0.18",
 		"vue-tsc": "^3.2.2",
-		"wrangler": "^4.61.0"
+		"wrangler": "^4.61.1"
 	},
 	"engines": {
 		"node": "^20.19.0 || >=22.12.0"

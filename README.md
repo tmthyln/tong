@@ -1,42 +1,40 @@
 # tong
 
-This template should help get you started developing with Vue 3 in Vite.
+A web-based language learning and text understanding system for Chinese (Mandarin).
+It is designed to be single user per deployment.
 
-## Recommended IDE Setup
+The system
+- [lexicon] understands what characters/words/concepts the user knows. This can be used to assess the difficulty of a new passage/text and progressively increase user vocabulary.
+- [frequency lists] uses frequency lists under the hood to help maximize time spent learning characters.
+- [dictionary] provides more specific and useful ways to query characters and phrases.
+  - (fuzzy) keyword search
+  - semantic search
+  - structural search
+- [translation] enables the user to translate with a super-powered autocomplete: with AI assistance or not, with all relevant context, and tools at their fingertips. 
+- [knowledge graph] links together specific entities (with their relationships) and topics to enhance long-range connection-forming.
 
-[VS Code](https://code.visualstudio.com/) + [Vue (Official)](https://marketplace.visualstudio.com/items?itemName=Vue.volar) (and disable Vetur).
+## Guiding Principles
 
-## Recommended Browser Setup
+1. Pre-process everything into "raw" Markdown (rich annotated text is ok, but don't deal with the complexity of XML, etc.).
+2. The default level of detail is a single `document`.
+   - Below the level of a document is a text `chunk`.
+   - Above the level of a document, they `document`s can be grouped in a hierarchy of books, collections, series, etc.
+   - At the top level is a `global` scope.
 
-- Chromium-based browsers (Chrome, Edge, Brave, etc.):
-  - [Vue.js devtools](https://chromewebstore.google.com/detail/vuejs-devtools/nhdogjmejiglipccpnnnanhbledajbpd)
-  - [Turn on Custom Object Formatter in Chrome DevTools](http://bit.ly/object-formatters)
-- Firefox:
-  - [Vue.js devtools](https://addons.mozilla.org/en-US/firefox/addon/vue-js-devtools/)
-  - [Turn on Custom Object Formatter in Firefox DevTools](https://fxdx.dev/firefox-devtools-custom-object-formatters/)
 
-## Type Support for `.vue` Imports in TS
+## Setup
 
-TypeScript cannot handle type information for `.vue` imports by default, so we replace the `tsc` CLI with `vue-tsc` for type checking. In editors, we need [Volar](https://marketplace.visualstudio.com/items?itemName=Vue.volar) to make the TypeScript language service aware of `.vue` types.
+### Initial configuration
 
-## Customize configuration
+These steps only need to be done once per deployment instance.
 
-See [Vite Configuration Reference](https://vite.dev/config/).
+```shell
+# create D1 database
+npx wrangler d1 create tong  # output database id needs to be set in wrangler.toml
 
-## Project Setup
+# create R2 bucket
+npx wrangler r2 bucket create tong-documents
 
-```sh
-npm install
-```
-
-### Compile and Hot-Reload for Development
-
-```sh
-npm run dev
-```
-
-### Type-Check, Compile and Minify for Production
-
-```sh
-npm run build
+# create vector stores
+npx wrangler vectorize create tong-doc-chunks --dimensions=768 --metric=cosine
 ```

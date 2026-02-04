@@ -18,4 +18,10 @@ export default defineConfig({
 			'@': fileURLToPath(new URL('./src', import.meta.url))
 		},
 	},
+	server: {
+		watch: {
+			// Ignore generated files that might trigger HMR before WS is ready
+			ignored: ['**/node_modules/**', '**/dist/**', '**/.wrangler/**'],
+		},
+	},
 })
