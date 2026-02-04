@@ -4,6 +4,92 @@ import { loadExtractedContent } from '../lib/extract-content'
 
 const libraryRoutes = new Hono<{ Bindings: Env }>()
 
+// Get directory tree structure
+libraryRoutes.get('/', async (c) => {
+  // Fetch all document groups
+  const groupsResult = await c.env.DB.prepare(
+    'SELECT id, name, parent_id, group_type FROM document_group ORDER BY name'
+  ).all<{
+    id: number
+    name: string
+    parent_id: number | null
+    group_type: string
+  }>()
+
+  // Fetch all documents with minimal info for tree display
+  const docsResult = await c.env.DB.prepare(
+    `SELECT id, title, original_doc_filename, parent_id, extracted_doc_char_count
+     FROM document ORDER BY COALESCE(title, original_doc_filename)`
+  ).all<{
+    id: number
+    title: string | null
+    original_doc_filename: string
+    parent_id: number | null
+    extracted_doc_char_count: number
+  }>()
+
+  // Build tree structure
+  interface TreeNode {
+    id: string
+    name: string
+    type: 'folder' | 'document'
+    groupType?: string
+    children?: TreeNode[]
+    documentId?: number
+    charCount?: number
+  }
+
+  const groupMap = new Map<number, TreeNode>()
+  const rootNodes: TreeNode[] = []
+
+  // Create folder nodes
+  for (const group of groupsResult.results) {
+    const node: TreeNode = {
+      id: `group-${group.id}`,
+      name: group.name,
+      type: 'folder',
+      groupType: group.group_type,
+      children: [],
+    }
+    groupMap.set(group.id, node)
+  }
+
+  // Link folder hierarchy
+  for (const group of groupsResult.results) {
+    const node = groupMap.get(group.id)!
+    if (group.parent_id === null) {
+      rootNodes.push(node)
+    } else {
+      const parent = groupMap.get(group.parent_id)
+      if (parent && parent.children) {
+        parent.children.push(node)
+      }
+    }
+  }
+
+  // Add documents to their parent folders or root
+  for (const doc of docsResult.results) {
+    const node: TreeNode = {
+      id: `doc-${doc.id}`,
+      name: doc.title || doc.original_doc_filename,
+      type: 'document',
+      documentId: doc.id,
+      charCount: doc.extracted_doc_char_count,
+    }
+
+    if (doc.parent_id === null) {
+      rootNodes.push(node)
+    } else {
+      const parent = groupMap.get(doc.parent_id)
+      if (parent && parent.children) {
+        parent.children.push(node)
+      }
+    }
+  }
+
+  return c.json({ tree: rootNodes })
+})
+
 libraryRoutes.get('/document', async (c) => {
   const limit = Math.min(100, Math.max(1, parseInt(c.req.query('limit') || '20', 10)))
   const nextToken = c.req.query('nextToken')
@@ -123,6 +209,11 @@ libraryRoutes.get('/document/:id', async (c) => {
   if (!doc) {
     return c.json({ error: 'Document not found' }, 404)
   }
+
+  // Update last accessed timestamp (non-blocking)
+  c.env.DB.prepare('UPDATE document SET date_last_accessed = ? WHERE id = ?')
+    .bind(new Date().toISOString(), id)
+    .run()
 
   const extractedContent = await loadExtractedContent(doc.extracted_doc_location, c.env)
 
@@ -270,12 +361,137 @@ libraryRoutes.get('/document/:id/original', async (c) => {
   return new Response(object.body, { headers })
 })
 
+// List all folders
+libraryRoutes.get('/folder', async (c) => {
+  const result = await c.env.DB.prepare(
+    'SELECT id, name, parent_id, group_type FROM document_group ORDER BY name'
+  ).all<{
+    id: number
+    name: string
+    parent_id: number | null
+    group_type: string
+  }>()
+
+  const folders = result.results.map((f) => ({
+    id: f.id,
+    name: f.name,
+    parentId: f.parent_id,
+    groupType: f.group_type,
+  }))
+
+  return c.json({ folders })
+})
+
+// Create a new folder
+libraryRoutes.post('/folder', async (c) => {
+  const body = await c.req.json<{ name: string; groupType: string }>()
+
+  if (!body.name || body.name.trim() === '') {
+    return c.json({ error: 'Folder name is required' }, 400)
+  }
+
+  const validTypes = ['book', 'series', 'collection']
+  if (!validTypes.includes(body.groupType)) {
+    return c.json({ error: `Invalid folder type. Must be one of: ${validTypes.join(', ')}` }, 400)
+  }
+
+  const result = await c.env.DB.prepare(
+    'INSERT INTO document_group (name, parent_id, group_type) VALUES (?, NULL, ?) RETURNING id'
+  )
+    .bind(body.name.trim(), body.groupType)
+    .first<{ id: number }>()
+
+  if (!result) {
+    return c.json({ error: 'Failed to create folder' }, 500)
+  }
+
+  return c.json({ id: result.id, name: body.name.trim(), groupType: body.groupType }, 201)
+})
+
+// Rename folder
+libraryRoutes.patch('/folder/:id', async (c) => {
+  const id = parseInt(c.req.param('id'), 10)
+  if (isNaN(id)) {
+    return c.json({ error: 'Invalid folder ID' }, 400)
+  }
+
+  const body = await c.req.json<{ name: string }>()
+
+  if (!body.name || body.name.trim() === '') {
+    return c.json({ error: 'Folder name is required' }, 400)
+  }
+
+  const folder = await c.env.DB.prepare('SELECT id FROM document_group WHERE id = ?')
+    .bind(id)
+    .first()
+
+  if (!folder) {
+    return c.json({ error: 'Folder not found' }, 404)
+  }
+
+  await c.env.DB.prepare('UPDATE document_group SET name = ? WHERE id = ?')
+    .bind(body.name.trim(), id)
+    .run()
+
+  return c.json({ success: true, name: body.name.trim() })
+})
+
+// Move document to folder
+libraryRoutes.patch('/document/:id', async (c) => {
+  const id = parseInt(c.req.param('id'), 10)
+  if (isNaN(id)) {
+    return c.json({ error: 'Invalid document ID' }, 400)
+  }
+
+  const body = await c.req.json<{ folderId: number | null }>()
+
+  // Verify document exists
+  const doc = await c.env.DB.prepare('SELECT id FROM document WHERE id = ?')
+    .bind(id)
+    .first()
+
+  if (!doc) {
+    return c.json({ error: 'Document not found' }, 404)
+  }
+
+  // Verify folder exists if provided
+  if (body.folderId !== null) {
+    const folder = await c.env.DB.prepare('SELECT id FROM document_group WHERE id = ?')
+      .bind(body.folderId)
+      .first()
+
+    if (!folder) {
+      return c.json({ error: 'Folder not found' }, 404)
+    }
+  }
+
+  // Update document's folder
+  await c.env.DB.prepare('UPDATE document SET parent_id = ? WHERE id = ?')
+    .bind(body.folderId, id)
+    .run()
+
+  return c.json({ success: true, parentId: body.folderId })
+})
+
 libraryRoutes.post('/document', async (c) => {
   const formData = await c.req.formData()
   const file = formData.get('file')
+  const folderIdStr = formData.get('folderId')
+  const folderId = folderIdStr ? parseInt(folderIdStr as string, 10) : null
 
   if (!file || !(file instanceof File)) {
     return c.json({ error: 'No file provided' }, 400)
+  }
+
+  // Verify folder exists if provided
+  if (folderId !== null) {
+    const folder = await c.env.DB.prepare('SELECT id FROM document_group WHERE id = ?')
+      .bind(folderId)
+      .first()
+
+    if (!folder) {
+      return c.json({ error: 'Folder not found' }, 404)
+    }
   }
 
   const fileInfo = await storeUploadedFile(file, c.env)
@@ -296,6 +512,7 @@ libraryRoutes.post('/document', async (c) => {
       mimetype: fileInfo.mimetype,
       contentHash: fileInfo.contentHash,
       dateUploaded: new Date().toISOString(),
+      parentId: folderId,
     },
   })
 

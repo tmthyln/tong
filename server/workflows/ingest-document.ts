@@ -11,6 +11,7 @@ interface IngestDocumentParams {
   mimetype: string
   contentHash: string
   dateUploaded: string
+  parentId: number | null
 }
 
 export class IngestDocumentWorkflow extends WorkflowEntrypoint<Env, IngestDocumentParams> {
@@ -42,8 +43,9 @@ export class IngestDocumentWorkflow extends WorkflowEntrypoint<Env, IngestDocume
           date_uploaded,
           extracted_doc_location,
           extracted_doc_char_count,
-          extracted_doc_unique_char_count
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+          extracted_doc_unique_char_count,
+          parent_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         RETURNING id`
       )
         .bind(
@@ -55,7 +57,8 @@ export class IngestDocumentWorkflow extends WorkflowEntrypoint<Env, IngestDocume
           payload.dateUploaded,
           extractedLocation,
           charStats.charCount,
-          charStats.uniqueCharCount
+          charStats.uniqueCharCount,
+          payload.parentId
         )
         .first<{ id: number }>()
 
