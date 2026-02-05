@@ -1,0 +1,90 @@
+-- Migration number: 0005 	 2026-02-04
+
+-- Default node types
+INSERT INTO node_type (name, definition) VALUES
+  ('PERSON', 'An individual human being, real or fictional'),
+  ('GPE', 'A geopolitical entity such as a country, state, province, or city'),
+  ('LOCATION', 'A physical location that is not a geopolitical entity, such as a mountain, river, building, or landmark'),
+  ('OBJECT', 'A physical object, artifact, or tangible item such as a book, tool, or work of art'),
+  ('ORGANIZATION', 'An organized group such as a company, institution, school of thought, or political party'),
+  ('TIME.ABSOLUTE', 'A specific point or date in time, including named periods such as dynasties or eras'),
+  ('TIME.INTERVAL', 'A duration or span of time'),
+  ('ABILITY', 'A skill, capability, or area of competency'),
+  ('STATE', 'A condition, quality, or state of being'),
+  ('EVENT', 'A notable occurrence or historical event');
+
+-- Node type examples
+INSERT INTO node_type_example (node_type_id, example) VALUES
+  ((SELECT id FROM node_type WHERE name = 'PERSON'), '孔子'),
+  ((SELECT id FROM node_type WHERE name = 'PERSON'), '李白'),
+  ((SELECT id FROM node_type WHERE name = 'PERSON'), '诸葛亮'),
+  ((SELECT id FROM node_type WHERE name = 'GPE'), '中国'),
+  ((SELECT id FROM node_type WHERE name = 'GPE'), '北京'),
+  ((SELECT id FROM node_type WHERE name = 'GPE'), '四川省'),
+  ((SELECT id FROM node_type WHERE name = 'LOCATION'), '长城'),
+  ((SELECT id FROM node_type WHERE name = 'LOCATION'), '长江'),
+  ((SELECT id FROM node_type WHERE name = 'LOCATION'), '泰山'),
+  ((SELECT id FROM node_type WHERE name = 'OBJECT'), '论语'),
+  ((SELECT id FROM node_type WHERE name = 'OBJECT'), '指南针'),
+  ((SELECT id FROM node_type WHERE name = 'OBJECT'), '兵马俑'),
+  ((SELECT id FROM node_type WHERE name = 'ORGANIZATION'), '北京大学'),
+  ((SELECT id FROM node_type WHERE name = 'ORGANIZATION'), '儒家'),
+  ((SELECT id FROM node_type WHERE name = 'ORGANIZATION'), '共产党'),
+  ((SELECT id FROM node_type WHERE name = 'TIME.ABSOLUTE'), '1949年10月1日'),
+  ((SELECT id FROM node_type WHERE name = 'TIME.ABSOLUTE'), '唐朝'),
+  ((SELECT id FROM node_type WHERE name = 'TIME.ABSOLUTE'), '春秋时期'),
+  ((SELECT id FROM node_type WHERE name = 'TIME.INTERVAL'), '三年'),
+  ((SELECT id FROM node_type WHERE name = 'TIME.INTERVAL'), '两个小时'),
+  ((SELECT id FROM node_type WHERE name = 'TIME.INTERVAL'), '几十年'),
+  ((SELECT id FROM node_type WHERE name = 'ABILITY'), '书法'),
+  ((SELECT id FROM node_type WHERE name = 'ABILITY'), '游泳'),
+  ((SELECT id FROM node_type WHERE name = 'ABILITY'), '弹琴'),
+  ((SELECT id FROM node_type WHERE name = 'STATE'), '饥饿'),
+  ((SELECT id FROM node_type WHERE name = 'STATE'), '幸福'),
+  ((SELECT id FROM node_type WHERE name = 'STATE'), '繁荣'),
+  ((SELECT id FROM node_type WHERE name = 'EVENT'), '辛亥革命'),
+  ((SELECT id FROM node_type WHERE name = 'EVENT'), '长征'),
+  ((SELECT id FROM node_type WHERE name = 'EVENT'), '鸦片战争');
+
+-- Default edge types
+INSERT INTO edge_type (name, reverse_name, definition) VALUES
+  ('LOCATED_IN', 'CONTAINS', 'Indicates spatial containment or geographical location'),
+  ('PART_OF', 'HAS_PART', 'Indicates a component or subdivision relationship'),
+  ('MEMBER_OF', 'HAS_MEMBER', 'Indicates membership or belonging to a group or organization'),
+  ('PARTICIPATED_IN', 'HAD_PARTICIPANT', 'Indicates involvement or participation in an event'),
+  ('OCCURRED_AT', 'SITE_OF', 'Indicates the location where an event took place'),
+  ('OCCURRED_DURING', 'TIMEFRAME_OF', 'Indicates when an event or state took place'),
+  ('HAS_ABILITY', 'ABILITY_OF', 'Indicates that an entity possesses a skill or capability'),
+  ('IN_STATE', 'STATE_OF', 'Indicates being in a particular condition or state'),
+  ('CREATED', 'CREATED_BY', 'Indicates authorship or creation of an artifact'),
+  ('FOUNDED', 'FOUNDED_BY', 'Indicates establishment of an organization or geopolitical entity'),
+  ('LASTED', NULL, 'Indicates the duration of an event or state'),
+  ('BORN_IN', 'BIRTHPLACE_OF', 'Indicates where a person was born or originated');
+
+-- Edge type examples
+INSERT INTO edge_type_example (edge_type_id, example) VALUES
+  ((SELECT id FROM edge_type WHERE name = 'LOCATED_IN'), '故宫 → 北京'),
+  ((SELECT id FROM edge_type WHERE name = 'LOCATED_IN'), '北京 → 中国'),
+  ((SELECT id FROM edge_type WHERE name = 'LOCATED_IN'), '泰山 → 山东省'),
+  ((SELECT id FROM edge_type WHERE name = 'PART_OF'), '海淀区 → 北京'),
+  ((SELECT id FROM edge_type WHERE name = 'PART_OF'), '四川省 → 中国'),
+  ((SELECT id FROM edge_type WHERE name = 'MEMBER_OF'), '孔子 → 儒家'),
+  ((SELECT id FROM edge_type WHERE name = 'MEMBER_OF'), '杜甫 → 唐代诗人'),
+  ((SELECT id FROM edge_type WHERE name = 'PARTICIPATED_IN'), '毛泽东 → 长征'),
+  ((SELECT id FROM edge_type WHERE name = 'PARTICIPATED_IN'), '林则徐 → 鸦片战争'),
+  ((SELECT id FROM edge_type WHERE name = 'OCCURRED_AT'), '辛亥革命 → 武昌'),
+  ((SELECT id FROM edge_type WHERE name = 'OCCURRED_AT'), '鸦片战争 → 广州'),
+  ((SELECT id FROM edge_type WHERE name = 'OCCURRED_DURING'), '辛亥革命 → 1911年'),
+  ((SELECT id FROM edge_type WHERE name = 'OCCURRED_DURING'), '长征 → 1934年'),
+  ((SELECT id FROM edge_type WHERE name = 'HAS_ABILITY'), '李白 → 诗歌'),
+  ((SELECT id FROM edge_type WHERE name = 'HAS_ABILITY'), '王羲之 → 书法'),
+  ((SELECT id FROM edge_type WHERE name = 'IN_STATE'), '百姓 → 饥饿'),
+  ((SELECT id FROM edge_type WHERE name = 'IN_STATE'), '唐朝 → 繁荣'),
+  ((SELECT id FROM edge_type WHERE name = 'CREATED'), '孔子 → 论语'),
+  ((SELECT id FROM edge_type WHERE name = 'CREATED'), '曹雪芹 → 红楼梦'),
+  ((SELECT id FROM edge_type WHERE name = 'FOUNDED'), '孙中山 → 中华民国'),
+  ((SELECT id FROM edge_type WHERE name = 'FOUNDED'), '秦始皇 → 秦朝'),
+  ((SELECT id FROM edge_type WHERE name = 'LASTED'), '唐朝 → 289年'),
+  ((SELECT id FROM edge_type WHERE name = 'LASTED'), '长征 → 两年'),
+  ((SELECT id FROM edge_type WHERE name = 'BORN_IN'), '孔子 → 鲁国'),
+  ((SELECT id FROM edge_type WHERE name = 'BORN_IN'), '李白 → 碎叶城');
