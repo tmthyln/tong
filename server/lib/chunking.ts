@@ -17,8 +17,8 @@ interface ChunkIndex {
 }
 
 const MIN_CHUNK_SIZE = 100
-const TARGET_MIN_SIZE = 500
-const TARGET_MAX_SIZE = 2000
+const TARGET_MIN_SIZE = 200
+const TARGET_MAX_SIZE = 700
 
 /**
  * Generates semantic chunk indices for a markdown document.
