@@ -56,7 +56,29 @@ const renderedContent = computed(() => {
   return marked(document.value.extractedContent)
 })
 
-function renderChunk(content: string): string {
+function renderChunk(chunk: Chunk): string {
+  const entities = chunk.entities
+    .filter((e): e is Entity & { startIndex: number; endIndex: number; extractedText: string } =>
+      e.startIndex != null && e.endIndex != null && e.extractedText != null
+    )
+    .sort((a, b) => a.startIndex - b.startIndex)
+
+  if (entities.length === 0) {
+    return marked(chunk.content) as string
+  }
+
+  // Build content with entity underline spans inserted
+  // Process from end to start to preserve indices
+  let content = chunk.content
+  for (let i = entities.length - 1; i >= 0; i--) {
+    const e = entities[i]
+    const tooltip = e.label ? `${e.entityType}: ${e.label}` : e.entityType
+    const before = content.slice(0, e.startIndex)
+    const text = content.slice(e.startIndex, e.endIndex)
+    const after = content.slice(e.endIndex)
+    content = `${before}<span class="entity-underline" title="${tooltip.replace(/"/g, '&quot;')}">${text}</span>${after}`
+  }
+
   return marked(content) as string
 }
 
@@ -174,7 +196,7 @@ onMounted(fetchDocument)
           <v-row>
             <v-col cols="6">
               <v-card variant="outlined" class="h-100">
-                <v-card-text class="document-content" v-html="renderChunk(chunk.content)" />
+                <v-card-text class="document-content" v-html="renderChunk(chunk)" />
               </v-card>
             </v-col>
             <v-col cols="6">
@@ -226,5 +248,12 @@ onMounted(fetchDocument)
 .chunk-row :deep(.v-textarea textarea) {
   font-size: 1rem;
   line-height: 1.6;
+}
+
+.document-content :deep(.entity-underline) {
+  text-decoration: underline;
+  text-decoration-color: rgb(var(--v-theme-primary));
+  text-underline-offset: 3px;
+  cursor: help;
 }
 </style>

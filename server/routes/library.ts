@@ -298,6 +298,37 @@ libraryRoutes.get('/document/:id', async (c) => {
     }
   }
 
+  // Fetch all entities sourced from this document
+  const allEntitiesResult = await c.env.DB.prepare(
+    `SELECT id, source_chunk_id, entity_type, extracted_text,
+            chunk_start_index, chunk_end_index, label, scope
+     FROM extracted_entity
+     WHERE source_document_id = ?
+     ORDER BY id`
+  )
+    .bind(id)
+    .all<{
+      id: number
+      source_chunk_id: number | null
+      entity_type: string
+      extracted_text: string | null
+      chunk_start_index: number | null
+      chunk_end_index: number | null
+      label: string | null
+      scope: string
+    }>()
+
+  const entities = allEntitiesResult.results.map((e) => ({
+    id: e.id,
+    chunkId: e.source_chunk_id,
+    entityType: e.entity_type,
+    extractedText: e.extracted_text,
+    startIndex: e.chunk_start_index,
+    endIndex: e.chunk_end_index,
+    label: e.label,
+    scope: e.scope,
+  }))
+
   // Map chunks with their entities
   const chunks = chunksResult.results.map((chunk) => ({
     id: chunk.id,
@@ -322,6 +353,7 @@ libraryRoutes.get('/document/:id', async (c) => {
     uniqueCharCount: doc.extracted_doc_unique_char_count,
     parentId: doc.parent_id,
     extractedContent,
+    entities,
     chunks,
   })
 })
