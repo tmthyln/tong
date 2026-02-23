@@ -5,13 +5,13 @@ It is designed to be single user per deployment.
 
 The system
 - [lexicon] understands what characters/words/concepts the user knows. This can be used to assess the difficulty of a new passage/text and progressively increase user vocabulary.
-- [frequency lists] uses frequency lists under the hood to help maximize time spent learning characters.
-- [dictionary] provides more specific and useful ways to query characters and phrases.
+  - [frequency lists] uses frequency lists under the hood to help maximize time spent learning characters.
+- [dictionary](#dictionary-lookup) provides more specific and useful ways to query characters and phrases.
   - (fuzzy) keyword search
   - semantic search
   - structural search
-- [translation] enables the user to translate with a super-powered autocomplete: with AI assistance or not, with all relevant context, and tools at their fingertips. 
-- [knowledge graph] links together specific entities (with their relationships) and topics to enhance long-range connection-forming.
+- [translation](#computer-assisted-translation-cat) enables the user to translate with a super-powered autocomplete: with AI assistance or not, with all relevant context, and tools at their fingertips. 
+- [knowledge graph](#entities-and-relationships) links together specific entities (with their relationships) and topics to enhance long-range connection-forming.
 
 
 ## Guiding Principles
@@ -21,6 +21,41 @@ The system
    - Below the level of a document is a text `chunk`.
    - Above the level of a document, they `document`s can be grouped in a hierarchy of books, collections, series, etc.
    - At the top level is a `global` scope.
+
+
+### Dictionary Lookup
+
+In some sense, a (bilingual) dictionary is simple.
+The dictionary stores headwords with auxiliary information like pronunciation, definitions, examples, links, etc. indexed by headwords.
+At query time, users can usually only search for headwords (although full text search over it),
+but there are many other ways we may want to search (based on the information we have) using some combination of
+- headwords (substring matching)
+- pronunciation (especially in Chinese, where we may hear something that resolves to any of dozens of words)
+- definition (reverse indexed search)
+- semantic meaning (similar to definition, but more general to answer the question of "some word here that means XX" but may not match the definition well)
+- substructure/stroke (knowing the number of strokes, or knowing the character component(s) for part of the character and its location)
+
+### Entities and Relationships
+
+Entities are extracted at the lowest level of context, scoped to individual chunks.
+Some relationships are also extracted at this level (intra-chunk relationships).
+
+Coreference resolution identifies the non-empty set of extracted chunk-scoped entities that refer to the same entity
+and merges them into a single document-scoped entity.
+If both entities of a relationship are promoted to distinct doc-scoped entities,
+the relationship is promoted to a 
+
+(what happens when a document changes parent folder?)
+
+### Computer Assisted Translation (CAT)
+
+Translation, especially of complex topics, is an inherently iterative process that pulls from a variety of knowledge stores.
+- Who is this person, and where have I seen them before? (Same for projects, objects, places, etc.)
+- What is this word? Should I know it or do I need to look it up? (And look-ups are contextual, dependent on the source material)
+- Who is the audience, and how should certain phrases be rendered in the target language? How have I (or others) translated this kind of thing before? 
+- Are there a lot of words I don't know? Am I ready to understand and translate this document?
+
+You might start with a particular section (not necessarily the top, e.g. for papers), start reading, look up some words, start translating a bit, turn around to do some research on the topic in the target language, go back to translating, realize what some acronym means and go back and change earlier translations, etc.
 
 
 ## Setup
