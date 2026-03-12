@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 
 interface Document {
   id: number
@@ -28,15 +28,17 @@ interface Folder {
   groupType: string
 }
 
-const recommendedDocuments = ref([
-  { id: 1, title: 'Getting Started Guide', description: 'Introduction to the platform' },
-  { id: 2, title: 'Advanced Techniques', description: 'Deep dive into features' },
-  { id: 3, title: 'Best Practices', description: 'Tips and recommendations' },
-  { id: 4, title: 'API Reference', description: 'Complete API documentation' },
-  { id: 5, title: 'Case Studies', description: 'Real-world examples' },
-])
-
 const documents = ref<Document[]>([])
+
+const recentDocuments = computed(() =>
+  [...documents.value]
+    .filter((d) => d.date_last_accessed)
+    .sort(
+      (a, b) =>
+        new Date(b.date_last_accessed!).getTime() - new Date(a.date_last_accessed!).getTime(),
+    )
+    .slice(0, 9),
+)
 const loading = ref(false)
 const fetchError = ref<string | null>(null)
 
@@ -405,9 +407,9 @@ async function handleFileUpload(event: Event) {
   <div class="w-100 pa-4">
     <h1 class="text-h4 mb-6">Library</h1>
 
-    <!-- Recommended Documents Carousel -->
-    <section class="mb-8">
-      <h2 class="text-h5 mb-4">Recommended Documents</h2>
+    <!-- Recent Documents Carousel -->
+    <section v-if="recentDocuments.length > 0" class="mb-8">
+      <h2 class="text-h5 mb-4">Recent Documents</h2>
       <v-carousel
         height="200"
         show-arrows="hover"
@@ -415,22 +417,26 @@ async function handleFileUpload(event: Event) {
         cycle
       >
         <v-carousel-item
-          v-for="i in Math.ceil(recommendedDocuments.length / 3)"
+          v-for="i in Math.ceil(recentDocuments.length / 3)"
           :key="i"
         >
           <v-row class="h-100 ma-0" align="center">
             <v-col
-              v-for="doc in recommendedDocuments.slice((i - 1) * 3, i * 3)"
+              v-for="doc in recentDocuments.slice((i - 1) * 3, i * 3)"
               :key="doc.id"
               cols="4"
             >
-              <v-card class="mx-2" height="160">
+              <v-card class="mx-2" height="160" :to="`/document/${doc.id}`">
                 <v-card-item>
-                  <v-card-title>{{ doc.title }}</v-card-title>
-                  <v-card-subtitle>{{ doc.description }}</v-card-subtitle>
+                  <v-card-title class="text-truncate">{{ doc.original_doc_filename }}</v-card-title>
+                  <v-card-subtitle>
+                    {{ new Date(doc.date_last_accessed!).toLocaleDateString() }}
+                  </v-card-subtitle>
                 </v-card-item>
                 <v-card-actions>
-                  <v-btn variant="text" color="primary">Open</v-btn>
+                  <v-chip size="small" variant="text">
+                    {{ doc.extracted_doc_char_count.toLocaleString() }} chars
+                  </v-chip>
                 </v-card-actions>
               </v-card>
             </v-col>
