@@ -50,9 +50,8 @@ const features = [
       <v-card variant="tonal" max-width="720">
         <v-card-text class="text-body-1">
           <p class="mb-3">
-            Tong (通) is a personal reading and study environment for Mandarin Chinese. The name
-            evokes <em>tōng</em> — to pass through, to connect, to achieve fluency — the feeling of
-            a language opening up as you move deeper into it.
+            Tong (通) is a personal reading and study environment for (Mandarin) Chinese. The name (tōng)
+            means <em>to pass through, to connect, to achieve fluency</em> — deep and thorough understanding of a language.
           </p>
           <p>
             Import documents, look up words as you read, build your personal vocabulary, and watch
