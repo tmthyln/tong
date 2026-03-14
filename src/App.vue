@@ -10,7 +10,7 @@ const isDark = computed(() => theme.global.current.value.dark)
 
 function toggleTheme() {
   const newTheme = isDark.value ? 'light' : 'dark'
-  theme.global.name.value = newTheme
+  theme.change(newTheme)
   localStorage.setItem('theme', newTheme)
 }
 
@@ -55,7 +55,12 @@ const navItems = [
 
     <v-app-bar>
       <v-app-bar-nav-icon @click="drawer = !drawer" />
-      <v-toolbar-title>TONG</v-toolbar-title>
+      <v-toolbar-title>
+        <div class="d-flex align-center ga-2">
+          <img src="/favicon.svg" height="30" width="30" alt="Tong" style="border-radius: 6px;" />
+          <span>Tong</span>
+        </div>
+      </v-toolbar-title>
       <v-spacer />
       <v-btn
         :icon="isDark ? 'mdi-weather-sunny' : 'mdi-weather-night'"
