@@ -40,6 +40,11 @@ name = "ingest-document"
 binding = "INGEST_DOCUMENT_WORKFLOW"
 class_name = "IngestDocumentWorkflow"
 
+[[workflows]]
+name = "refresh-cedict"
+binding = "REFRESH_CEDICT_WORKFLOW"
+class_name = "RefreshCedictWorkflow"
+
 [[vectorize]]
 binding = "CHUNK_VECTORS"
 index_name = "tong-doc-chunks"
@@ -48,3 +53,4 @@ remote = true
 [ai]
 binding = "AI"
 remote = true
+
