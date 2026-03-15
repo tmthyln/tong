@@ -27,7 +27,7 @@ export function parseCedictText(text: string): { entries: CedictEntry[]; meta: C
   let epoch = 0
   let date = ''
 
-  for (const line of text.split('\n')) {
+  for (const line of text.split(/\r?\n/)) {
     if (line.startsWith('#!')) {
       const eq = line.indexOf('=')
       if (eq === -1) continue

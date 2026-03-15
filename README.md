@@ -1,4 +1,4 @@
-# tong
+# tong (通)
 
 A web-based language learning and text understanding system for Chinese (Mandarin).
 It is designed to be single user per deployment.

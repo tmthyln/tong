@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, onUnmounted } from 'vue'
 
 interface TypeExample {
   id: number
@@ -182,7 +182,63 @@ async function executeDelete() {
   await fetchAll()
 }
 
+// ── Dictionary Refresh ───────────────────────────────────────
+
+interface RefreshJob {
+  jobId: string
+  status: 'running' | 'completed' | 'failed'
+  totalEntries: number | null
+  processedEntries: number
+  percent: number | null
+  startedAt: string
+  completedAt: string | null
+  error: string | null
+}
+
+const refreshJob = ref<RefreshJob | null>(null)
+const refreshStarting = ref(false)
+let pollTimer: ReturnType<typeof setInterval> | null = null
+
+function stopPolling() {
+  if (pollTimer) {
+    clearInterval(pollTimer)
+    pollTimer = null
+  }
+}
+
+async function pollJob(jobId: string) {
+  const res = await fetch(`/api/dictionary/refresh/${jobId}`)
+  if (!res.ok) return
+  const job = await res.json() as RefreshJob
+  refreshJob.value = job
+  if (job.status !== 'running') stopPolling()
+}
+
+async function startRefresh() {
+  refreshStarting.value = true
+  try {
+    const res = await fetch('/api/dictionary/refresh', { method: 'POST' })
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    const { jobId } = await res.json() as { jobId: string }
+    refreshJob.value = {
+      jobId,
+      status: 'running',
+      totalEntries: null,
+      processedEntries: 0,
+      percent: null,
+      startedAt: new Date().toISOString(),
+      completedAt: null,
+      error: null,
+    }
+    stopPolling()
+    pollTimer = setInterval(() => pollJob(jobId), 2000)
+  } finally {
+    refreshStarting.value = false
+  }
+}
+
 onMounted(fetchAll)
+onUnmounted(stopPolling)
 </script>
 
 <template>
@@ -343,6 +399,81 @@ onMounted(fetchAll)
         </v-expansion-panel-text>
       </v-expansion-panel>
     </v-expansion-panels>
+
+    <!-- Dictionary -->
+    <h2 class="text-h5 mb-3">Dictionary</h2>
+    <v-card variant="outlined" class="mb-8">
+      <v-card-text>
+        <div class="d-flex align-start justify-space-between ga-4 flex-wrap">
+          <div>
+            <div class="text-body-1 font-weight-medium mb-1">CEDICT Refresh</div>
+            <div class="text-body-2 text-medium-emphasis">
+              Download and import the latest CC-CEDICT data into the dictionary.
+              This replaces existing entries with updated definitions.
+            </div>
+          </div>
+          <v-btn
+            prepend-icon="mdi-refresh"
+            variant="tonal"
+            :loading="refreshStarting"
+            :disabled="refreshJob?.status === 'running'"
+            @click="startRefresh"
+          >
+            Refresh Dictionary
+          </v-btn>
+        </div>
+
+        <!-- Job status -->
+        <template v-if="refreshJob">
+          <v-divider class="my-4" />
+
+          <!-- Running -->
+          <template v-if="refreshJob.status === 'running'">
+            <div class="d-flex align-center justify-space-between mb-2">
+              <span class="text-body-2 font-weight-medium">Importing…</span>
+              <span class="text-caption text-medium-emphasis">
+                <template v-if="refreshJob.totalEntries">
+                  {{ refreshJob.processedEntries.toLocaleString() }} / {{ refreshJob.totalEntries.toLocaleString() }} entries
+                </template>
+                <template v-else>Starting…</template>
+              </span>
+            </div>
+            <v-progress-linear
+              :model-value="refreshJob.percent ?? 0"
+              :indeterminate="refreshJob.percent === null"
+              color="primary"
+              rounded
+              height="6"
+            />
+          </template>
+
+          <!-- Completed -->
+          <v-alert
+            v-else-if="refreshJob.status === 'completed'"
+            type="success"
+            variant="tonal"
+            density="compact"
+            icon="mdi-check-circle-outline"
+          >
+            <span class="text-body-2">
+              Import complete —
+              {{ refreshJob.processedEntries.toLocaleString() }} entries processed.
+            </span>
+          </v-alert>
+
+          <!-- Failed -->
+          <v-alert
+            v-else-if="refreshJob.status === 'failed'"
+            type="error"
+            variant="tonal"
+            density="compact"
+            icon="mdi-alert-circle-outline"
+          >
+            <span class="text-body-2">{{ refreshJob.error ?? 'Refresh failed.' }}</span>
+          </v-alert>
+        </template>
+      </v-card-text>
+    </v-card>
 
     <!-- Node Type Dialog -->
     <v-dialog v-model="nodeDialog" max-width="500">
