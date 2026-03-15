@@ -6,6 +6,9 @@ name = "tong"
 compatibility_date = "2025-09-27"
 main = "server/index.ts"
 
+[limits]
+subrequests = 10_000_000
+
 [[routes]]
 pattern = "tong.timothylin.me"
 custom_domain = true
@@ -39,6 +42,9 @@ binding = "DOCUMENTS"
 name = "ingest-document"
 binding = "INGEST_DOCUMENT_WORKFLOW"
 class_name = "IngestDocumentWorkflow"
+
+[workflows.limits]
+steps = 25_000
 
 [[workflows]]
 name = "refresh-cedict"

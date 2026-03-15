@@ -4,7 +4,10 @@ import { countChineseCharacters } from '../lib/chinese-utils'
 import { generateChunkIndices } from '../lib/chunking'
 import { embedAndStoreChunk } from '../lib/embedding'
 import { translateAndStoreChunk } from '../lib/translation'
-import { extractEntities } from '../lib/entity-extraction'
+import { extractEntitiesForNodeTypes, removeOverlaps } from '../lib/entity-extraction'
+import type { NodeTypeInput, ExtractedEntity } from '../lib/entity-extraction'
+import { extractRelationshipsForEdgeType } from '../lib/relationship-extraction'
+import type { EdgeTypeInput, ExtractedRelationship } from '../lib/relationship-extraction'
 
 interface IngestDocumentParams {
   location: string
@@ -15,24 +18,29 @@ interface IngestDocumentParams {
   parentId: number | null
 }
 
+interface EntityTypeContext {
+  nodeTypes: NodeTypeInput[]
+  edgeTypes: EdgeTypeInput[]
+}
+
 export class IngestDocumentWorkflow extends WorkflowEntrypoint<Env, IngestDocumentParams> {
   async run(event: WorkflowEvent<IngestDocumentParams>, step: WorkflowStep) {
     const { payload } = event
 
-    // Step 1: Extract content from document and save as markdown to R2
+    // Phase 1: Extract content from document and save as markdown to R2
     const extractResult = await step.do('extract-content', async () => {
       const result = await extractContent(payload.location, payload.mimetype, this.env)
       return { extractedLocation: result.extractedLocation, title: result.title }
     })
     const { extractedLocation, title } = extractResult
 
-    // Step 2: Count Chinese characters (loads content from R2)
+    // Phase 2: Count Chinese characters
     const charStats = await step.do('count-characters', async () => {
       const content = await loadExtractedContent(extractedLocation, this.env)
       return countChineseCharacters(content)
     })
 
-    // Step 3: Create the document record in the database
+    // Phase 3: Create the document record in the database
     const documentId = await step.do('create-document-record', async () => {
       const result = await this.env.DB.prepare(
         `INSERT INTO document (
@@ -69,17 +77,17 @@ export class IngestDocumentWorkflow extends WorkflowEntrypoint<Env, IngestDocume
       return result.id
     })
 
-    // Step 4: Generate text chunk indices (loads content from R2)
+    // Phase 4: Generate text chunk indices
     const chunkIndices = await step.do('generate-chunk-indices', async () => {
       const content = await loadExtractedContent(extractedLocation, this.env)
       return generateChunkIndices(content)
     })
 
-    // Step 5: Persist each text chunk in database
+    // Phase 5: Persist each text chunk in database
     const chunkIds = await step.do('persist-text-chunks', async () => {
       const content = await loadExtractedContent(extractedLocation, this.env)
 
-      return Promise.all(
+      const settled = await Promise.allSettled(
         chunkIndices.map((indices, order) =>
           step.do(`persist-text-chunk-${order}`, async () => {
             const chunkContent = content.slice(indices.startIndex, indices.endIndex)
@@ -114,10 +122,20 @@ export class IngestDocumentWorkflow extends WorkflowEntrypoint<Env, IngestDocume
           })
         )
       )
+
+      const ids: number[] = []
+      for (const r of settled) {
+        if (r.status === 'fulfilled') {
+          ids.push(r.value)
+        } else {
+          console.warn('[ingest] Failed to persist chunk:', r.reason)
+        }
+      }
+      return ids
     })
 
-    // Step 6: Embed each chunk (loads chunk content from DB)
-    await Promise.all(
+    // Phase 6: Embed each chunk
+    await Promise.allSettled(
       chunkIds.map((chunkId) =>
         step.do(`embed-chunk-${chunkId}`, async () => {
           const chunk = await this.env.DB.prepare(
@@ -134,8 +152,8 @@ export class IngestDocumentWorkflow extends WorkflowEntrypoint<Env, IngestDocume
       )
     )
 
-    // Step 7: Translate each chunk (loads chunk content from DB)
-    await Promise.all(
+    // Phase 7: Translate each chunk
+    await Promise.allSettled(
       chunkIds.map((chunkId) =>
         step.do(`translate-chunk-${chunkId}`, async () => {
           const chunk = await this.env.DB.prepare(
@@ -152,79 +170,167 @@ export class IngestDocumentWorkflow extends WorkflowEntrypoint<Env, IngestDocume
       )
     )
 
-    // Step 8: Load node types for entity extraction
-    const nodeTypes = await step.do('load-node-types', async () => {
-      const types = await this.env.DB.prepare(
-        'SELECT id, name, definition FROM node_type ORDER BY name'
-      ).all<{ id: number; name: string; definition: string }>()
+    // Phase 8: Load entity type definitions
+    const entityTypeContext = await step.do(
+      'load-entity-type-definitions',
+      async (): Promise<EntityTypeContext> => {
+        const [nodeTypesResult, nodeExamplesResult, edgeTypesResult, edgeExamplesResult] =
+          await Promise.allSettled([
+            this.env.DB.prepare('SELECT id, name, definition FROM node_type ORDER BY name').all<{
+              id: number
+              name: string
+              definition: string
+            }>(),
+            this.env.DB.prepare(
+              'SELECT node_type_id, example FROM node_type_example ORDER BY id'
+            ).all<{ node_type_id: number; example: string }>(),
+            this.env.DB.prepare(
+              'SELECT id, name, reverse_name, definition FROM edge_type ORDER BY name'
+            ).all<{ id: number; name: string; reverse_name: string | null; definition: string }>(),
+            this.env.DB.prepare(
+              'SELECT edge_type_id, example FROM edge_type_example ORDER BY id'
+            ).all<{ edge_type_id: number; example: string }>(),
+          ])
 
-      const examples = await this.env.DB.prepare(
-        'SELECT node_type_id, example FROM node_type_example ORDER BY id'
-      ).all<{ node_type_id: number; example: string }>()
+        if (nodeTypesResult.status === 'rejected') throw new Error(`Failed to load node types: ${nodeTypesResult.reason}`)
+        if (nodeExamplesResult.status === 'rejected') throw new Error(`Failed to load node examples: ${nodeExamplesResult.reason}`)
+        if (edgeTypesResult.status === 'rejected') throw new Error(`Failed to load edge types: ${edgeTypesResult.reason}`)
+        if (edgeExamplesResult.status === 'rejected') throw new Error(`Failed to load edge examples: ${edgeExamplesResult.reason}`)
 
-      const examplesByType: Record<number, string[]> = {}
-      for (const ex of examples.results) {
-        if (!examplesByType[ex.node_type_id]) examplesByType[ex.node_type_id] = []
-        examplesByType[ex.node_type_id].push(ex.example)
+        const nodeExamplesByType: Record<number, string[]> = {}
+        for (const ex of nodeExamplesResult.value.results) {
+          if (!nodeExamplesByType[ex.node_type_id]) nodeExamplesByType[ex.node_type_id] = []
+          nodeExamplesByType[ex.node_type_id].push(ex.example)
+        }
+
+        const edgeExamplesByType: Record<number, string[]> = {}
+        for (const ex of edgeExamplesResult.value.results) {
+          if (!edgeExamplesByType[ex.edge_type_id]) edgeExamplesByType[ex.edge_type_id] = []
+          edgeExamplesByType[ex.edge_type_id].push(ex.example)
+        }
+
+        return {
+          nodeTypes: nodeTypesResult.value.results.map((t) => ({
+            name: t.name,
+            definition: t.definition,
+            examples: nodeExamplesByType[t.id] || [],
+          })),
+          edgeTypes: edgeTypesResult.value.results.map((t) => ({
+            name: t.name,
+            reverseName: t.reverse_name,
+            definition: t.definition,
+            examples: edgeExamplesByType[t.id] || [],
+          })),
+        }
       }
+    )
 
-      return types.results.map((t) => ({
-        name: t.name,
-        definition: t.definition,
-        examples: examplesByType[t.id] || [],
-      }))
-    })
-
-    // Step 9: Extract entities from each chunk
-    console.log(`[ingest] Node types loaded: ${nodeTypes.length}`, nodeTypes.map((t) => t.name))
-    if (nodeTypes.length > 0) {
-      for (const chunkId of chunkIds) {
-        await step.do(`extract-entities-${chunkId}`, async () => {
-          console.log(`[ingest] Extracting entities for chunk ${chunkId}`)
-          try {
-            const chunk = await this.env.DB.prepare(
-              'SELECT content FROM text_chunk WHERE id = ?'
-            )
-              .bind(chunkId)
-              .first<{ content: string }>()
-
-            if (!chunk) {
-              throw new Error(`Chunk ${chunkId} not found`)
-            }
-
-            const entities = await extractEntities(chunk.content, nodeTypes, this.env)
-            console.log(`[ingest] Chunk ${chunkId}: ${entities.length} entities extracted`)
-
-            if (entities.length > 0) {
-              const stmt = this.env.DB.prepare(
-                `INSERT INTO extracted_entity
-                  (source_document_id, source_chunk_id, entity_type, extracted_text,
-                   chunk_start_index, chunk_end_index, scope)
-                 VALUES (?, ?, ?, ?, ?, ?, ?)`
-              )
-              await this.env.DB.batch(
-                entities.map((e) =>
-                  stmt.bind(
-                    documentId,
-                    chunkId,
-                    e.nodeType,
-                    e.text,
-                    e.startIndex,
-                    e.endIndex,
-                    'chunk'
-                  )
-                )
-              )
-              console.log(`[ingest] Chunk ${chunkId}: ${entities.length} entities inserted`)
-            }
-          } catch (err) {
-            console.error(`[ingest] Entity extraction failed for chunk ${chunkId}:`, err)
-            throw err
-          }
-        })
-      }
-    } else {
+    if (entityTypeContext.nodeTypes.length === 0) {
       console.log('[ingest] No node types configured, skipping entity extraction')
+      return { documentId, chunkCount: chunkIds.length }
+    }
+
+    console.log(
+      `[ingest] Starting entity extraction — ${chunkIds.length} chunks, ${entityTypeContext.nodeTypes.length} node types, ${entityTypeContext.edgeTypes.length} edge types`
+    )
+
+    // Phase 9: Extract entities, relationships, and persist — one chunk at a time
+    for (const chunkId of chunkIds) {
+      const chunkContent = await step.do(`load-chunk-content-${chunkId}`, async () => {
+        const chunk = await this.env.DB.prepare('SELECT content FROM text_chunk WHERE id = ?')
+          .bind(chunkId)
+          .first<{ content: string }>()
+        if (!chunk) throw new Error(`Chunk ${chunkId} not found`)
+        return chunk.content
+      })
+
+      // Entity extraction: one step per node type
+      const rawEntities: ExtractedEntity[] = []
+      for (const nodeType of entityTypeContext.nodeTypes) {
+        const entities = await step.do(
+          `extract-entities-${chunkId}-${nodeType.name}`,
+          async (): Promise<ExtractedEntity[]> =>
+            extractEntitiesForNodeTypes(chunkContent, [nodeType], this.env)
+        )
+        console.log(`[ingest] Chunk ${chunkId} / ${nodeType.name}: ${entities.length} entities`)
+        rawEntities.push(...entities)
+      }
+
+      const entities = removeOverlaps(rawEntities)
+      console.log(
+        `[ingest] Chunk ${chunkId}: ${entities.length} entities after overlap removal (${rawEntities.length} raw)`
+      )
+
+      // Relationship extraction: one step per edge type
+      const relationships: ExtractedRelationship[] = []
+      if (entities.length > 0 && entityTypeContext.edgeTypes.length > 0) {
+        for (const edgeType of entityTypeContext.edgeTypes) {
+          const rels = await step.do(
+            `extract-relationships-${chunkId}-${edgeType.name}`,
+            async (): Promise<ExtractedRelationship[]> =>
+              extractRelationshipsForEdgeType(chunkContent, entities, edgeType, this.env)
+          )
+          console.log(`[ingest] Chunk ${chunkId} / ${edgeType.name}: ${rels.length} relationships`)
+          relationships.push(...rels)
+        }
+      }
+
+      // Persist entities + relationships for this chunk
+      await step.do(`persist-entities-${chunkId}`, async () => {
+        console.log(
+          `[ingest] Chunk ${chunkId}: persisting ${entities.length} entities + ${relationships.length} relationships`
+        )
+        const statements: D1PreparedStatement[] = []
+
+        if (entities.length > 0) {
+          const entityStmt = this.env.DB.prepare(
+            `INSERT OR IGNORE INTO extracted_entity
+              (source_document_id, source_chunk_id, entity_type, extracted_text,
+               chunk_start_index, chunk_end_index, scope)
+             VALUES (?, ?, ?, ?, ?, ?, ?)`
+          )
+          for (const entity of entities) {
+            statements.push(
+              entityStmt.bind(
+                documentId,
+                chunkId,
+                entity.nodeType,
+                entity.text,
+                entity.startIndex,
+                entity.endIndex,
+                'chunk'
+              )
+            )
+          }
+        }
+
+        if (relationships.length > 0) {
+          const relStmt = this.env.DB.prepare(
+            `INSERT OR IGNORE INTO extracted_relationship
+              (source_document_id, source_chunk_id, edge_type, from_entity_text, to_entity_text, scope)
+             VALUES (?, ?, ?, ?, ?, ?)`
+          )
+          for (const rel of relationships) {
+            statements.push(
+              relStmt.bind(
+                documentId,
+                chunkId,
+                rel.edgeType,
+                rel.fromText,
+                rel.toText,
+                'chunk'
+              )
+            )
+          }
+        }
+
+        if (statements.length > 0) {
+          await this.env.DB.batch(statements)
+          console.log(`[ingest] Chunk ${chunkId}: batch succeeded (${statements.length} statements)`)
+        } else {
+          console.log(`[ingest] Chunk ${chunkId}: nothing to persist`)
+        }
+      })
     }
 
     return { documentId, chunkCount: chunkIds.length }

@@ -1,10 +1,10 @@
-interface NodeTypeInput {
+export interface NodeTypeInput {
   name: string
   definition: string
   examples: string[]
 }
 
-interface ExtractedEntity {
+export interface ExtractedEntity {
   nodeType: string
   text: string
   startIndex: number
@@ -14,15 +14,15 @@ interface ExtractedEntity {
 const MODEL = '@cf/meta/llama-3.3-70b-instruct-fp8-fast' as BaseAiTextGenerationModels
 
 /**
- * Extract entities of the given node types from a chunk of text.
+ * Extract entities for a subset of node types from a chunk of text.
  * Each node type is processed independently in a separate LLM call.
+ * Does NOT apply overlap removal — callers should apply removeOverlaps if needed.
  */
-export async function extractEntities(
+export async function extractEntitiesForNodeTypes(
   chunkContent: string,
   nodeTypes: NodeTypeInput[],
   env: Env
 ): Promise<ExtractedEntity[]> {
-  console.log(`[entity-extraction] Starting extraction for ${nodeTypes.length} types, chunk length: ${chunkContent.length}`)
   const allEntities: ExtractedEntity[] = []
 
   for (const nodeType of nodeTypes) {
@@ -40,13 +40,26 @@ export async function extractEntities(
       console.warn(`[entity-extraction] AI.run failed for ${nodeType.name}:`, err)
       continue
     }
-    console.log(`[entity-extraction] AI responded for ${nodeType.name}`)
 
     const entities = parseResponse(result, chunkContent, nodeType.name)
     console.log(`[entity-extraction] ${nodeType.name}: ${entities.length} entities`)
     allEntities.push(...entities)
   }
 
+  return allEntities
+}
+
+/**
+ * Extract entities of all given node types from a chunk of text, with overlap removal.
+ * Convenience wrapper for in-process use (e.g. tests, one-off calls).
+ */
+export async function extractEntities(
+  chunkContent: string,
+  nodeTypes: NodeTypeInput[],
+  env: Env
+): Promise<ExtractedEntity[]> {
+  console.log(`[entity-extraction] Starting extraction for ${nodeTypes.length} types, chunk length: ${chunkContent.length}`)
+  const allEntities = await extractEntitiesForNodeTypes(chunkContent, nodeTypes, env)
   const deduped = removeOverlaps(allEntities)
   console.log(`[entity-extraction] Total: ${deduped.length} entities (${allEntities.length} before overlap removal)`)
   return deduped
@@ -147,11 +160,11 @@ function parseResponse(
 }
 
 /**
- * Remove overlapping entities, preferring longer spans.
+ * Remove overlapping entities from a sorted list, preferring longer spans.
  * When two entities overlap, the longer one is kept.
  * If equal length, the one encountered first is kept.
  */
-function removeOverlaps(entities: ExtractedEntity[]): ExtractedEntity[] {
+export function removeOverlaps(entities: ExtractedEntity[]): ExtractedEntity[] {
   // Sort by startIndex, then by longer span first
   const sorted = [...entities].sort((a, b) => {
     if (a.startIndex !== b.startIndex) return a.startIndex - b.startIndex

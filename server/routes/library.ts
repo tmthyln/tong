@@ -1,6 +1,7 @@
 import { Hono } from 'hono'
 import { storeUploadedFile } from '../lib/documents'
 import { loadExtractedContent } from '../lib/extract-content'
+import { removeOverlaps } from '../lib/entity-extraction'
 
 const libraryRoutes = new Hono<{ Bindings: Env }>()
 
@@ -295,6 +296,36 @@ libraryRoutes.get('/document/:id', async (c) => {
         label: entity.label,
         scope: entity.scope,
       })
+    }
+
+    // Apply cross-type overlap removal per chunk (entities are now inserted independently per type)
+    for (const chunkId of Object.keys(entitiesByChunkId)) {
+      const chunkEntities = entitiesByChunkId[Number(chunkId)]
+      const positioned = chunkEntities.filter(
+        (e) => e.startIndex !== null && e.endIndex !== null
+      )
+      const unpositioned = chunkEntities.filter(
+        (e) => e.startIndex === null || e.endIndex === null
+      )
+      const dedupedPositioned = removeOverlaps(
+        positioned.map((e) => ({
+          nodeType: e.entityType,
+          text: e.extractedText ?? '',
+          startIndex: e.startIndex!,
+          endIndex: e.endIndex!,
+        }))
+      )
+      const dedupedIds = new Set(
+        dedupedPositioned.map((d) =>
+          positioned.find(
+            (e) => e.startIndex === d.startIndex && e.endIndex === d.endIndex && e.entityType === d.nodeType
+          )?.id
+        )
+      )
+      entitiesByChunkId[Number(chunkId)] = [
+        ...positioned.filter((e) => dedupedIds.has(e.id)),
+        ...unpositioned,
+      ]
     }
   }
 

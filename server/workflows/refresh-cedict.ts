@@ -47,7 +47,7 @@ export class RefreshCedictWorkflow extends WorkflowEntrypoint<Env, RefreshCedict
 
         // Split entries into chunks and store each as a JSON file in R2
         const chunkCount = Math.ceil(entries.length / CHUNK_SIZE)
-        await Promise.all(
+        await Promise.allSettled(
           Array.from({ length: chunkCount }, async (_, i) => {
             const chunk = entries.slice(i * CHUNK_SIZE, (i + 1) * CHUNK_SIZE)
             await this.env.DOCUMENTS.put(
