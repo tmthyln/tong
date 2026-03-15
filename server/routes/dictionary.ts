@@ -47,9 +47,12 @@ function toLikePattern(pattern: string): string {
 //   limit      – default 50, max 200
 
 dictionaryRoutes.get('/search', async (c) => {
-  const q         = c.req.query('q')?.trim() ?? ''
-  const tone      = c.req.query('tone')?.trim() ?? ''
-  const def_      = c.req.query('def')?.trim() ?? ''
+  const q          = c.req.query('q')?.trim() ?? ''
+  const tone       = c.req.query('tone')?.trim() ?? ''
+  const def_       = c.req.query('def')?.trim() ?? ''
+  // headwords=1 restricts text search to simplified/traditional columns only
+  // (excludes pinyin and definitions from FTS matching)
+  const headwordsOnly = c.req.query('headwords') === '1'
   // no-op params — accepted for API stability, ignored until schema supports them
   // const _strokes   = c.req.query('strokes')
   // const _radical   = c.req.query('radical')
@@ -76,11 +79,14 @@ dictionaryRoutes.get('/search', async (c) => {
       likePattern = toLikePattern(q)
     } else {
       strategy = 'fts'
-      // For ASCII-only input (likely pinyin or English), append * for prefix matching
-      // so that e.g. "shui" also matches "shui3", "shu" matches "shui" etc.
-      const ftsQ = /^[a-zA-Z0-9\s]+$/.test(q) && !q.endsWith('*')
-        ? sanitizeFts5(q) + '*'
-        : sanitizeFts5(q)
+      const sanitized = sanitizeFts5(q)
+      // headwords=1: restrict FTS match to the character columns only
+      // (FTS5 column filter syntax: {col1 col2}:term)
+      const ftsQ = headwordsOnly
+        ? `{simplified traditional}:${sanitized}`
+        : /^[a-zA-Z0-9\s]+$/.test(q) && !q.endsWith('*')
+          ? sanitized + '*'
+          : sanitized
       if (ftsQ) ftsMatchParts.push(ftsQ)
     }
   }

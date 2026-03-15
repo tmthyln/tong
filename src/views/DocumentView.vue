@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, computed } from 'vue'
+import { ref, onMounted, onUnmounted, computed } from 'vue'
 import { useRoute } from 'vue-router'
 import { marked } from 'marked'
 
@@ -122,7 +122,96 @@ async function fetchDocument() {
   }
 }
 
-onMounted(fetchDocument)
+// ── Selection toolbar & inline dictionary lookup ──────────────────────────────
+
+interface DictEntry {
+  id: number
+  traditional: string
+  simplified: string
+  pinyin: string
+  definitions: string[]
+}
+
+const TONE_MARKS: Record<string, string[]> = {
+  a: ['ā', 'á', 'ǎ', 'à', 'a'], e: ['ē', 'é', 'ě', 'è', 'e'],
+  i: ['ī', 'í', 'ǐ', 'ì', 'i'], o: ['ō', 'ó', 'ǒ', 'ò', 'o'],
+  u: ['ū', 'ú', 'ǔ', 'ù', 'u'], ü: ['ǖ', 'ǘ', 'ǚ', 'ǜ', 'ü'],
+}
+
+function pinyinToMarked(pinyin: string): string {
+  return pinyin.split(' ').map((syl) => {
+    const m = syl.match(/^(.+?)([1-5])$/)
+    if (!m) return syl
+    const [, s, t] = m
+    const ti = parseInt(t) - 1
+    const base = s.replace(/v/g, 'ü')
+    if (ti === 4) return base
+    if (/[ae]/.test(base)) return base.replace(/[ae]/, (c) => TONE_MARKS[c][ti])
+    if (base.includes('ou')) return base.replace('o', TONE_MARKS['o'][ti])
+    const mv = base.match(/[iuüaeo](?=[^iuüaeo]*$)/)
+    if (mv && mv.index !== undefined)
+      return base.slice(0, mv.index) + TONE_MARKS[base[mv.index]][ti] + base.slice(mv.index + 1)
+    return base
+  }).join(' ')
+}
+
+// Toolbar state
+const toolbarRef = ref<HTMLElement | null>(null)
+const toolbar = ref({
+  show:    false,
+  x:       0,
+  y:       0,
+  text:    '',
+  mode:    'actions' as 'actions' | 'dictionary',
+  results: [] as DictEntry[],
+  loading: false,
+  error:   null as string | null,
+})
+
+const toolbarStyle = computed(() => ({
+  left:      `${Math.max(80, Math.min(toolbar.value.x, window.innerWidth - 80))}px`,
+  top:       `${toolbar.value.y}px`,
+  transform: 'translate(-50%, calc(-100% - 6px))',
+}))
+
+function onContentMouseUp() {
+  const sel = window.getSelection()
+  if (!sel || sel.isCollapsed || !sel.toString().trim()) return
+  const text = sel.toString().trim()
+  const rect = sel.getRangeAt(0).getBoundingClientRect()
+  toolbar.value = { show: true, x: rect.left + rect.width / 2, y: rect.top, text, mode: 'actions', results: [], loading: false, error: null }
+}
+
+function onDocumentMouseDown(e: MouseEvent) {
+  if (toolbarRef.value?.contains(e.target as Node)) return
+  toolbar.value.show = false
+}
+
+async function lookupInDictionary() {
+  toolbar.value.mode = 'dictionary'
+  toolbar.value.loading = true
+  toolbar.value.error = null
+  toolbar.value.results = []
+  try {
+    const res = await fetch(`/api/dictionary/search?q=${encodeURIComponent(toolbar.value.text)}&headwords=1`)
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    const data = await res.json() as { results: DictEntry[] }
+    toolbar.value.results = data.results
+  } catch (e) {
+    toolbar.value.error = e instanceof Error ? e.message : 'Lookup failed'
+  } finally {
+    toolbar.value.loading = false
+  }
+}
+
+onMounted(() => {
+  window.document.addEventListener('mousedown', onDocumentMouseDown)
+  fetchDocument()
+})
+
+onUnmounted(() => {
+  window.document.removeEventListener('mousedown', onDocumentMouseDown)
+})
 </script>
 
 <template>
@@ -174,12 +263,12 @@ onMounted(fetchDocument)
       </v-row>
 
       <!-- Normal reading view -->
-      <v-card v-if="!translationMode">
+      <v-card v-if="!translationMode" @mouseup="onContentMouseUp">
         <v-card-text class="document-content" v-html="renderedContent" />
       </v-card>
 
       <!-- Side-by-side translation view -->
-      <div v-else class="translation-view">
+      <div v-else class="translation-view" @mouseup="onContentMouseUp">
         <v-row class="translation-header mb-2">
           <v-col cols="6">
             <span class="text-subtitle-1 font-weight-medium">Original</span>
@@ -214,6 +303,81 @@ onMounted(fetchDocument)
       </div>
     </template>
   </div>
+
+  <!-- ── Selection toolbar (teleported to body) ───────────────────────────── -->
+  <Teleport to="body">
+    <div v-if="toolbar.show" ref="toolbarRef" class="selection-toolbar" :style="toolbarStyle">
+
+      <!-- Actions mode: just the button row -->
+      <v-card v-if="toolbar.mode === 'actions'" elevation="8" rounded="lg" class="pa-1">
+        <v-btn
+          size="small"
+          variant="text"
+          prepend-icon="mdi-book-search-outline"
+          @click="lookupInDictionary"
+        >
+          Define
+        </v-btn>
+      </v-card>
+
+      <!-- Dictionary mode: results inline -->
+      <v-card v-else elevation="8" rounded="lg" style="width: 320px;">
+        <div class="d-flex align-center px-3 pt-2 pb-1">
+          <span class="text-body-1 font-weight-medium">{{ toolbar.text }}</span>
+          <v-spacer />
+          <v-btn icon="mdi-close" variant="text" size="x-small" @click="toolbar.show = false" />
+        </div>
+        <v-divider />
+
+        <div style="max-height: 340px; overflow-y: auto;">
+          <div v-if="toolbar.loading" class="d-flex justify-center py-5">
+            <v-progress-circular indeterminate color="primary" size="24" />
+          </div>
+
+          <v-alert
+            v-else-if="toolbar.error"
+            type="error"
+            variant="tonal"
+            density="compact"
+            class="ma-2"
+            :text="toolbar.error"
+          />
+
+          <div
+            v-else-if="toolbar.results.length === 0"
+            class="text-center py-5 text-medium-emphasis text-body-2"
+          >
+            No entries found
+          </div>
+
+          <div
+            v-for="entry in toolbar.results"
+            :key="entry.id"
+            class="dict-popup-entry"
+          >
+            <div class="d-flex align-baseline ga-2 mb-1 flex-wrap">
+              <span class="text-h6 font-weight-light" style="line-height: 1.1;">
+                {{ entry.traditional }}
+              </span>
+              <span v-if="entry.traditional !== entry.simplified" class="text-caption text-disabled">
+                {{ entry.simplified }}
+              </span>
+              <span class="text-body-2 text-primary font-weight-medium">
+                {{ pinyinToMarked(entry.pinyin) }}
+              </span>
+            </div>
+            <div class="text-body-2 text-medium-emphasis">
+              <span v-for="(def, i) in entry.definitions" :key="i">
+                <span class="text-disabled mr-1" style="font-size: 0.7rem;">{{ i + 1 }}.</span>{{ def
+                }}<span v-if="i < entry.definitions.length - 1" class="mx-2 text-disabled">·</span>
+              </span>
+            </div>
+          </div>
+        </div>
+      </v-card>
+
+    </div>
+  </Teleport>
 </template>
 
 <style scoped>
@@ -248,6 +412,22 @@ onMounted(fetchDocument)
 .chunk-row :deep(.v-textarea textarea) {
   font-size: 1rem;
   line-height: 1.6;
+}
+
+/* Selection toolbar */
+.selection-toolbar {
+  position: fixed;
+  z-index: 1000;
+  pointer-events: auto;
+}
+
+.dict-popup-entry {
+  padding: 10px 14px;
+  border-bottom: 1px solid rgba(var(--v-border-color), var(--v-border-opacity));
+}
+
+.dict-popup-entry:last-child {
+  border-bottom: none;
 }
 
 .document-content :deep(.entity-underline) {
