@@ -22,6 +22,8 @@ The system
    - Above the level of a document, they `document`s can be grouped in a hierarchy of books, collections, series, etc.
    - At the top level is a `global` scope.
 
+Here are high-level principles for each component of the system.
+More technical details for how things are implemented are in [TECHNICAL.md](TECHNICAL.md).
 
 ### Dictionary Lookup
 
