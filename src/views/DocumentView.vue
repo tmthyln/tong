@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted, computed } from 'vue'
+import { ref, onMounted, onUnmounted, computed, watch, nextTick } from 'vue'
 import { useRoute } from 'vue-router'
 import { marked } from 'marked'
 
@@ -51,10 +51,6 @@ const documentTitle = computed(() => {
   return document.value.title || document.value.filename
 })
 
-const renderedContent = computed(() => {
-  if (!document.value) return ''
-  return marked(document.value.extractedContent)
-})
 
 function renderChunk(chunk: Chunk): string {
   const entities = chunk.entities
@@ -158,28 +154,125 @@ function pinyinToMarked(pinyin: string): string {
 // Toolbar state
 const toolbarRef = ref<HTMLElement | null>(null)
 const toolbar = ref({
-  show:    false,
-  x:       0,
-  y:       0,
-  text:    '',
-  mode:    'actions' as 'actions' | 'dictionary',
-  results: [] as DictEntry[],
-  loading: false,
-  error:   null as string | null,
+  show:           false,
+  x:              0,   // fixed left of popup (px)
+  y:              0,   // fixed top of popup (px)
+  text:           '',
+  mode:           'actions' as 'actions' | 'dictionary',
+  results:        [] as DictEntry[],
+  loading:        false,
+  error:          null as string | null,
+  chunkId:        null as number | null,
+  explanation:    null as string | null,
+  explainLoading: false,
 })
 
-const toolbarStyle = computed(() => ({
-  left:      `${Math.max(80, Math.min(toolbar.value.x, window.innerWidth - 80))}px`,
-  top:       `${toolbar.value.y}px`,
-  transform: 'translate(-50%, calc(-100% - 6px))',
-}))
+const POPUP_W = 320
+
+// x/y are the raw selection midpoint (viewport coords) until the user drags,
+// at which point they become the popup's direct left/top.
+const toolbarDragged = ref(false)
+
+const toolbarStyle = computed(() => {
+  if (toolbarDragged.value) {
+    return { left: `${toolbar.value.x}px`, top: `${toolbar.value.y}px` }
+  }
+  // Natural placement: centered above the selection via transform.
+  const cx = Math.max(4, Math.min(toolbar.value.x, window.innerWidth - 4))
+  return {
+    left:      `${cx}px`,
+    top:       `${toolbar.value.y}px`,
+    transform: 'translate(-50%, calc(-100% - 6px))',
+  }
+})
+
+// Clamp the popup so it stays fully within the viewport.
+function clampToViewport() {
+  const el = toolbarRef.value
+  if (!el) return
+  const rect = el.getBoundingClientRect()
+  // Switch to direct coords so adjustments move the popup predictably.
+  if (!toolbarDragged.value) {
+    toolbarDragged.value = true
+    toolbar.value.x = rect.left
+    toolbar.value.y = rect.top
+  }
+  const margin = 8
+  if (rect.right > window.innerWidth - margin)
+    toolbar.value.x -= rect.right - (window.innerWidth - margin)
+  if (rect.left < margin)
+    toolbar.value.x += margin - rect.left
+  if (rect.bottom > window.innerHeight - margin)
+    toolbar.value.y -= rect.bottom - (window.innerHeight - margin)
+  if (rect.top < margin)
+    toolbar.value.y += margin - rect.top
+}
+
+// Re-clamp whenever the explanation text loads (popup height grows).
+watch(() => toolbar.value.explanation, async (val) => {
+  if (!val) return
+  await nextTick()
+  clampToViewport()
+})
+
+// ── Drag ─────────────────────────────────────────────────────────────────────
+
+const drag = { active: false, startMouseX: 0, startMouseY: 0, startLeft: 0, startTop: 0 }
+
+function onHeaderPointerDown(e: PointerEvent) {
+  if (e.button !== 0) return
+  e.preventDefault()
+  const el = toolbarRef.value
+  if (!el) return
+  const rect = el.getBoundingClientRect()
+  // Switch to direct absolute positioning before drag begins.
+  toolbarDragged.value = true
+  toolbar.value.x = rect.left
+  toolbar.value.y = rect.top
+  drag.active      = true
+  drag.startMouseX = e.clientX
+  drag.startMouseY = e.clientY
+  drag.startLeft   = rect.left
+  drag.startTop    = rect.top
+  window.addEventListener('pointermove', onDragMove)
+  window.addEventListener('pointerup',   onDragEnd, { once: true })
+}
+
+function onDragMove(e: PointerEvent) {
+  if (!drag.active) return
+  toolbar.value.x = Math.max(8, Math.min(
+    drag.startLeft + e.clientX - drag.startMouseX,
+    window.innerWidth - POPUP_W - 8,
+  ))
+  toolbar.value.y = Math.max(8, drag.startTop + e.clientY - drag.startMouseY)
+}
+
+function onDragEnd() {
+  drag.active = false
+  window.removeEventListener('pointermove', onDragMove)
+}
 
 function onContentMouseUp() {
   const sel = window.getSelection()
   if (!sel || sel.isCollapsed || !sel.toString().trim()) return
   const text = sel.toString().trim()
-  const rect = sel.getRangeAt(0).getBoundingClientRect()
-  toolbar.value = { show: true, x: rect.left + rect.width / 2, y: rect.top, text, mode: 'actions', results: [], loading: false, error: null }
+  const selRect = sel.getRangeAt(0).getBoundingClientRect()
+
+  const node = sel.getRangeAt(0).startContainer
+  const el = (node.nodeType === Node.TEXT_NODE ? node.parentElement : node as Element)
+    ?.closest('[data-chunk-id]')
+  const chunkId = el ? Number(el.getAttribute('data-chunk-id')) : null
+
+  // Store raw selection midpoint; transform handles centering/placement above.
+  const x = selRect.left + selRect.width / 2
+  const y = selRect.top
+
+  toolbarDragged.value = false
+  toolbar.value = {
+    show: true, x, y, text,
+    mode: 'actions', results: [], loading: false, error: null,
+    chunkId, explanation: null, explainLoading: false,
+  }
 }
 
 function onDocumentMouseDown(e: MouseEvent) {
@@ -192,6 +285,8 @@ async function lookupInDictionary() {
   toolbar.value.loading = true
   toolbar.value.error = null
   toolbar.value.results = []
+  toolbar.value.explanation = null
+  toolbar.value.explainLoading = false
   try {
     const res = await fetch(`/api/dictionary/search?q=${encodeURIComponent(toolbar.value.text)}&headwords=1`)
     if (!res.ok) throw new Error(`HTTP ${res.status}`)
@@ -201,6 +296,29 @@ async function lookupInDictionary() {
     toolbar.value.error = e instanceof Error ? e.message : 'Lookup failed'
   } finally {
     toolbar.value.loading = false
+    await nextTick()
+    clampToViewport()
+  }
+}
+
+async function explainInContext() {
+  const { text, results, chunkId } = toolbar.value
+  if (!document.value || chunkId == null) return
+  toolbar.value.explainLoading = true
+  toolbar.value.error = null
+  try {
+    const res = await fetch('/api/dictionary/explain', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ term: text, entries: results, documentId: document.value.id, chunkId }),
+    })
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    const data = await res.json() as { explanation: string }
+    toolbar.value.explanation = data.explanation
+  } catch (e) {
+    toolbar.value.error = e instanceof Error ? e.message : 'Explain failed'
+  } finally {
+    toolbar.value.explainLoading = false
   }
 }
 
@@ -211,6 +329,8 @@ onMounted(() => {
 
 onUnmounted(() => {
   window.document.removeEventListener('mousedown', onDocumentMouseDown)
+  window.removeEventListener('pointermove', onDragMove)
+  window.removeEventListener('pointerup', onDragEnd)
 })
 </script>
 
@@ -264,7 +384,14 @@ onUnmounted(() => {
 
       <!-- Normal reading view -->
       <v-card v-if="!translationMode" @mouseup="onContentMouseUp">
-        <v-card-text class="document-content" v-html="renderedContent" />
+        <v-card-text class="document-content">
+          <div
+            v-for="chunk in document.chunks"
+            :key="chunk.id"
+            :data-chunk-id="chunk.id"
+            v-html="renderChunk(chunk)"
+          />
+        </v-card-text>
       </v-card>
 
       <!-- Side-by-side translation view -->
@@ -280,6 +407,7 @@ onUnmounted(() => {
         <div
           v-for="chunk in document.chunks"
           :key="chunk.id"
+          :data-chunk-id="chunk.id"
           class="chunk-row mb-4"
         >
           <v-row>
@@ -322,10 +450,10 @@ onUnmounted(() => {
 
       <!-- Dictionary mode: results inline -->
       <v-card v-else elevation="8" rounded="lg" style="width: 320px;">
-        <div class="d-flex align-center px-3 pt-2 pb-1">
+        <div class="d-flex align-center px-3 pt-2 pb-1 popup-header" @pointerdown="onHeaderPointerDown">
           <span class="text-body-1 font-weight-medium">{{ toolbar.text }}</span>
           <v-spacer />
-          <v-btn icon="mdi-close" variant="text" size="x-small" @click="toolbar.show = false" />
+          <v-btn icon="mdi-close" variant="text" size="x-small" @click="toolbar.show = false" @pointerdown.stop />
         </div>
         <v-divider />
 
@@ -374,6 +502,25 @@ onUnmounted(() => {
             </div>
           </div>
         </div>
+
+        <template v-if="!toolbar.loading && !toolbar.error && toolbar.results.length > 0">
+          <v-divider />
+          <div class="px-3 py-2">
+            <v-btn
+              size="small"
+              variant="text"
+              prepend-icon="mdi-lightbulb-outline"
+              :disabled="toolbar.explainLoading"
+              @click="explainInContext"
+            >
+              Explain in context
+            </v-btn>
+          </div>
+          <v-progress-linear v-if="toolbar.explainLoading" indeterminate color="primary" />
+          <div v-if="toolbar.explanation" class="text-body-2 pa-3">
+            {{ toolbar.explanation }}
+          </div>
+        </template>
       </v-card>
 
     </div>
@@ -419,6 +566,15 @@ onUnmounted(() => {
   position: fixed;
   z-index: 1000;
   pointer-events: auto;
+}
+
+.popup-header {
+  cursor: grab;
+  user-select: none;
+}
+
+.popup-header:active {
+  cursor: grabbing;
 }
 
 .dict-popup-entry {

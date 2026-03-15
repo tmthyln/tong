@@ -364,6 +364,94 @@ dictionaryRoutes.get('/segment', async (c) => {
   })
 })
 
+// POST /api/dictionary/explain
+//
+// Request body: { term, entries, documentId, chunkId }
+// Returns: { explanation: string }
+dictionaryRoutes.post('/explain', async (c) => {
+  const body = await c.req.json<{
+    term: string
+    entries: Array<{
+      traditional: string
+      simplified: string
+      pinyin: string
+      definitions: string[]
+    }>
+    documentId: number
+    chunkId: number
+  }>()
+
+  const { term, entries, documentId, chunkId } = body
+
+  // Fetch the target chunk's order
+  const targetChunk = await c.env.DB
+    .prepare(`SELECT chunk_order FROM text_chunk WHERE id = ? AND source_document_id = ?`)
+    .bind(chunkId, documentId)
+    .first<{ chunk_order: number }>()
+
+  if (!targetChunk) return c.json({ error: 'Chunk not found' }, 404)
+
+  const order = targetChunk.chunk_order
+
+  // Fetch context window: target ± 2 neighbors
+  const { results: contextChunks } = await c.env.DB
+    .prepare(
+      `SELECT content FROM text_chunk
+       WHERE source_document_id = ?
+         AND chunk_order BETWEEN ? AND ?
+       ORDER BY chunk_order`
+    )
+    .bind(documentId, order - 2, order + 2)
+    .all<{ content: string }>()
+
+  const contextText = contextChunks.map((r) => r.content).join('\n\n')
+
+  // Format entries for prompt
+  const formatEntry = (e: typeof entries[0]) =>
+    `${e.traditional} (${e.pinyin}): ${e.definitions.join('; ')}`
+
+  const topEntry = entries[0]
+  const otherEntries = entries.slice(1, 5)
+
+  const topEntryText = topEntry ? formatEntry(topEntry) : term
+  const otherEntriesText = otherEntries.length > 0
+    ? otherEntries.map(formatEntry).join('\n')
+    : '(none)'
+
+  const messages = [
+    {
+      role: 'system' as const,
+      content: 'You are a Chinese language tutor. Give direct, compact explanations. Never use filler phrases like "In this passage", "The context suggests", "Here,", or "This word". Start immediately with the meaning or usage.',
+    },
+    {
+      role: 'user' as const,
+      content: `The learner selected: "${term}"
+
+Dictionary entry shown:
+${topEntryText}
+
+Other returned entries (not shown to learner):
+${otherEntriesText}
+
+Text:
+${contextText}
+
+In 1–2 sentences, explain how "${term}" is used here. Skip anything obvious from the dictionary gloss.`,
+    },
+  ]
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const result = await c.env.AI.run('@cf/meta/llama-3.3-70b-instruct-fp8-fast' as any, {
+    messages,
+    temperature: 0.3,
+    max_tokens: 250,
+  })
+
+  const explanation = (result as { response?: string }).response ?? ''
+
+  return c.json({ explanation })
+})
+
 // POST /api/dictionary/refresh
 // Starts a CEDICT refresh workflow. Returns immediately with the job ID.
 dictionaryRoutes.post('/refresh', async (c) => {
