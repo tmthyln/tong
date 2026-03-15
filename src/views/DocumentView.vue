@@ -45,6 +45,7 @@ const loading = ref(false)
 const error = ref<string | null>(null)
 const translationMode = ref(false)
 const translations = ref<Record<number, string>>({})
+const focusedChunkId = ref<number | null>(null)
 
 const documentTitle = computed(() => {
   if (!document.value) return ''
@@ -162,9 +163,11 @@ const toolbar = ref({
   results:        [] as DictEntry[],
   loading:        false,
   error:          null as string | null,
-  chunkId:        null as number | null,
-  explanation:    null as string | null,
-  explainLoading: false,
+  chunkId:              null as number | null,
+  explanation:          null as string | null,
+  explainLoading:       false,
+  disambiguateLoading:  false,
+  disambiguatedEntryId: null as number | null,
 })
 
 const POPUP_W = 320
@@ -272,6 +275,7 @@ function onContentMouseUp() {
     show: true, x, y, text,
     mode: 'actions', results: [], loading: false, error: null,
     chunkId, explanation: null, explainLoading: false,
+    disambiguateLoading: false, disambiguatedEntryId: null,
   }
 }
 
@@ -287,6 +291,8 @@ async function lookupInDictionary() {
   toolbar.value.results = []
   toolbar.value.explanation = null
   toolbar.value.explainLoading = false
+  toolbar.value.disambiguateLoading = false
+  toolbar.value.disambiguatedEntryId = null
   try {
     const res = await fetch(`/api/dictionary/search?q=${encodeURIComponent(toolbar.value.text)}&headwords=1`)
     if (!res.ok) throw new Error(`HTTP ${res.status}`)
@@ -319,6 +325,28 @@ async function explainInContext() {
     toolbar.value.error = e instanceof Error ? e.message : 'Explain failed'
   } finally {
     toolbar.value.explainLoading = false
+  }
+}
+
+async function disambiguate() {
+  const { text, results, chunkId } = toolbar.value
+  if (!document.value || chunkId == null) return
+  toolbar.value.disambiguateLoading = true
+  toolbar.value.error = null
+  try {
+    const res = await fetch('/api/dictionary/disambiguate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ term: text, entries: results, documentId: document.value.id, chunkId }),
+    })
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    const data = await res.json() as { explanation: string; entryId: number }
+    toolbar.value.disambiguatedEntryId = data.entryId
+    toolbar.value.explanation = data.explanation
+  } catch (e) {
+    toolbar.value.error = e instanceof Error ? e.message : 'Disambiguate failed'
+  } finally {
+    toolbar.value.disambiguateLoading = false
   }
 }
 
@@ -394,39 +422,30 @@ onUnmounted(() => {
         </v-card-text>
       </v-card>
 
-      <!-- Side-by-side translation view -->
-      <div v-else class="translation-view" @mouseup="onContentMouseUp">
-        <v-row class="translation-header mb-2">
-          <v-col cols="6">
-            <span class="text-subtitle-1 font-weight-medium">Original</span>
-          </v-col>
-          <v-col cols="6">
-            <span class="text-subtitle-1 font-weight-medium">Translation</span>
-          </v-col>
-        </v-row>
-        <div
-          v-for="chunk in document.chunks"
-          :key="chunk.id"
-          :data-chunk-id="chunk.id"
-          class="chunk-row mb-4"
-        >
-          <v-row>
-            <v-col cols="6">
-              <v-card variant="outlined" class="h-100">
-                <v-card-text class="document-content" v-html="renderChunk(chunk)" />
-              </v-card>
-            </v-col>
-            <v-col cols="6">
+      <!-- Translation view: card behind original text only, textareas float on right -->
+      <div v-else class="translation-layout" @mouseup="onContentMouseUp">
+        <v-card class="translation-text-card" />
+        <div class="translation-grid">
+          <template v-for="chunk in document.chunks" :key="chunk.id">
+            <div
+              class="document-content translation-chunk-text"
+              :class="{ 'translation-chunk-text--active': focusedChunkId === chunk.id }"
+              :data-chunk-id="chunk.id"
+              v-html="renderChunk(chunk)"
+            />
+            <div class="translation-chunk-input">
               <v-textarea
                 v-model="translations[chunk.id]"
                 variant="outlined"
                 hide-details
                 auto-grow
                 rows="3"
-                placeholder="Enter translation..."
+                placeholder="Translation…"
+                @focus="focusedChunkId = chunk.id"
+                @blur="focusedChunkId = null"
               />
-            </v-col>
-          </v-row>
+            </div>
+          </template>
         </div>
       </div>
     </template>
@@ -482,6 +501,7 @@ onUnmounted(() => {
             v-for="entry in toolbar.results"
             :key="entry.id"
             class="dict-popup-entry"
+            :class="{ 'dict-popup-entry--selected': entry.id === toolbar.disambiguatedEntryId }"
           >
             <div class="d-flex align-baseline ga-2 mb-1 flex-wrap">
               <span class="text-h6 font-weight-light" style="line-height: 1.1;">
@@ -505,18 +525,28 @@ onUnmounted(() => {
 
         <template v-if="!toolbar.loading && !toolbar.error && toolbar.results.length > 0">
           <v-divider />
-          <div class="px-3 py-2">
+          <div class="px-3 py-2 d-flex ga-1">
             <v-btn
               size="small"
               variant="text"
               prepend-icon="mdi-lightbulb-outline"
-              :disabled="toolbar.explainLoading"
+              :disabled="toolbar.explainLoading || toolbar.disambiguateLoading"
               @click="explainInContext"
             >
-              Explain in context
+              Explain
+            </v-btn>
+            <v-btn
+              v-if="toolbar.results.length > 1"
+              size="small"
+              variant="text"
+              prepend-icon="mdi-help-circle-outline"
+              :disabled="toolbar.disambiguateLoading || toolbar.explainLoading"
+              @click="disambiguate"
+            >
+              Disambiguate
             </v-btn>
           </div>
-          <v-progress-linear v-if="toolbar.explainLoading" indeterminate color="primary" />
+          <v-progress-linear v-if="toolbar.explainLoading || toolbar.disambiguateLoading" indeterminate color="primary" />
           <div v-if="toolbar.explanation" class="text-body-2 pa-3">
             {{ toolbar.explanation }}
           </div>
@@ -544,19 +574,65 @@ onUnmounted(() => {
   margin-bottom: 0.5em;
 }
 
-.translation-view {
-  max-width: 100%;
+.translation-layout {
+  position: relative;
 }
 
-.translation-header {
-  position: sticky;
+/* Card sits behind the left column, stretched to full height of the layout */
+.translation-text-card {
+  position: absolute !important;
+  left: 0;
   top: 0;
-  background: rgb(var(--v-theme-background));
-  z-index: 1;
-  padding: 8px 0;
+  bottom: 0;
+  width: calc(50% - 8px); /* left column of 1fr 1fr grid with 16px column-gap */
+  pointer-events: none;
+  z-index: 0;
 }
 
-.chunk-row :deep(.v-textarea textarea) {
+.translation-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  column-gap: 16px;
+  position: relative;
+  z-index: 1;
+}
+
+.translation-chunk-text {
+  padding: 0 20px 0 22px;
+  position: relative;
+}
+
+.translation-chunk-text::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: rgba(var(--v-border-color), var(--v-border-opacity));
+  transition: width 0.15s ease, background 0.15s ease;
+}
+
+.translation-chunk-text--active::before {
+  width: 4px;
+  background: rgb(var(--v-theme-primary));
+}
+
+.translation-grid > :first-child {
+  padding-top: 16px;
+}
+
+.translation-grid > :nth-last-child(2) {
+  padding-bottom: 16px;
+}
+
+.translation-chunk-input {
+  padding: 8px 0;
+  display: flex;
+  align-items: flex-start;
+}
+
+.translation-chunk-input :deep(.v-textarea textarea) {
   font-size: 1rem;
   line-height: 1.6;
 }
@@ -584,6 +660,11 @@ onUnmounted(() => {
 
 .dict-popup-entry:last-child {
   border-bottom: none;
+}
+
+.dict-popup-entry--selected {
+  background: rgba(var(--v-theme-primary), 0.08);
+  border-radius: 4px;
 }
 
 .document-content :deep(.entity-underline) {
