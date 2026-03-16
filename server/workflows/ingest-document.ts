@@ -8,6 +8,7 @@ import { extractEntitiesForNodeTypes, deduplicateEntitiesLLM } from '../lib/enti
 import type { NodeTypeInput, ExtractedEntity } from '../lib/entity-extraction'
 import { extractRelationshipsForEdgeType } from '../lib/relationship-extraction'
 import type { EdgeTypeInput, ExtractedRelationship } from '../lib/relationship-extraction'
+import { resolveDocumentCoreference } from '../lib/coreference'
 
 const LLM_STEP_RETRIES = { retries: { limit: 4, delay: '5 second', backoff: 'exponential' } } as const
 
@@ -316,6 +317,11 @@ export class IngestDocumentWorkflow extends WorkflowEntrypoint<Env, IngestDocume
         })
       })
     )
+
+    // Phase 8.5: Document-wide coreference resolution
+    await step.do('coref-resolution', LLM_STEP_RETRIES, async () => {
+      await resolveDocumentCoreference(documentId, this.env)
+    })
 
     // Phase 9: Initial translation draft (all chunks in parallel)
     await Promise.allSettled(

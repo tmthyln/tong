@@ -254,6 +254,7 @@ libraryRoutes.get('/document/:id', async (c) => {
     endIndex: number | null
     label: string | null
     scope: string
+    parentId: number | null
   }>> = {}
 
   if (chunkIds.length > 0) {
@@ -266,7 +267,8 @@ libraryRoutes.get('/document/:id', async (c) => {
         chunk_start_index,
         chunk_end_index,
         label,
-        scope
+        scope,
+        parent_id
       FROM extracted_entity
       WHERE source_chunk_id IN (SELECT id FROM text_chunk WHERE source_document_id = ?)`
     )
@@ -280,6 +282,7 @@ libraryRoutes.get('/document/:id', async (c) => {
         chunk_end_index: number | null
         label: string | null
         scope: string
+        parent_id: number | null
       }>()
 
     for (const entity of entitiesResult.results) {
@@ -295,6 +298,7 @@ libraryRoutes.get('/document/:id', async (c) => {
         endIndex: entity.chunk_end_index,
         label: entity.label,
         scope: entity.scope,
+        parentId: entity.parent_id,
       })
     }
 
@@ -329,12 +333,12 @@ libraryRoutes.get('/document/:id', async (c) => {
     }
   }
 
-  // Fetch all entities sourced from this document
+  // Fetch document-scope entities
   const allEntitiesResult = await c.env.DB.prepare(
     `SELECT id, source_chunk_id, entity_type, extracted_text,
-            chunk_start_index, chunk_end_index, label, scope
+            chunk_start_index, chunk_end_index, label, scope, parent_id
      FROM extracted_entity
-     WHERE source_document_id = ?
+     WHERE source_document_id = ? AND scope = 'document'
      ORDER BY id`
   )
     .bind(id)
@@ -347,6 +351,7 @@ libraryRoutes.get('/document/:id', async (c) => {
       chunk_end_index: number | null
       label: string | null
       scope: string
+      parent_id: number | null
     }>()
 
   const entities = allEntitiesResult.results.map((e) => ({
@@ -358,6 +363,7 @@ libraryRoutes.get('/document/:id', async (c) => {
     endIndex: e.chunk_end_index,
     label: e.label,
     scope: e.scope,
+    parentId: e.parent_id,
   }))
 
   // Map chunks with their entities
