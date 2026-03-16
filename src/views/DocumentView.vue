@@ -715,7 +715,9 @@ onUnmounted(() => {
 
 .document-content :deep(.entity-underline) {
   cursor: help;
-  font-weight: 600;
+  text-decoration: underline;
+  text-decoration-style: dotted;
+  text-underline-offset: 5px;
 }
 
 .document-content :deep(.entity-underline--highlighted) {
