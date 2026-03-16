@@ -3,8 +3,8 @@ import { extractContent, loadExtractedContent } from '../lib/extract-content'
 import { countChineseCharacters } from '../lib/chinese-utils'
 import { generateChunkIndices } from '../lib/chunking'
 import { embedAndStoreChunk } from '../lib/embedding'
-import { translateAndStoreChunk } from '../lib/translation'
-import { extractEntitiesForNodeTypes, removeOverlaps } from '../lib/entity-extraction'
+import { translateChunkInitialDraft, translateChunkRevision } from '../lib/translation'
+import { extractEntitiesForNodeTypes, deduplicateEntitiesLLM } from '../lib/entity-extraction'
 import type { NodeTypeInput, ExtractedEntity } from '../lib/entity-extraction'
 import { extractRelationshipsForEdgeType } from '../lib/relationship-extraction'
 import type { EdgeTypeInput, ExtractedRelationship } from '../lib/relationship-extraction'
@@ -152,25 +152,7 @@ export class IngestDocumentWorkflow extends WorkflowEntrypoint<Env, IngestDocume
       )
     )
 
-    // Phase 7: Translate each chunk
-    await Promise.allSettled(
-      chunkIds.map((chunkId) =>
-        step.do(`translate-chunk-${chunkId}`, async () => {
-          const chunk = await this.env.DB.prepare(
-            'SELECT content FROM text_chunk WHERE id = ?'
-          )
-            .bind(chunkId)
-            .first<{ content: string }>()
-
-          if (!chunk) {
-            throw new Error(`Chunk ${chunkId} not found`)
-          }
-          await translateAndStoreChunk(chunkId, chunk.content, this.env)
-        })
-      )
-    )
-
-    // Phase 8: Load entity type definitions
+    // Phase 7: Load entity type definitions
     const entityTypeContext = await step.do(
       'load-entity-type-definitions',
       async (): Promise<EntityTypeContext> => {
@@ -234,104 +216,137 @@ export class IngestDocumentWorkflow extends WorkflowEntrypoint<Env, IngestDocume
       `[ingest] Starting entity extraction — ${chunkIds.length} chunks, ${entityTypeContext.nodeTypes.length} node types, ${entityTypeContext.edgeTypes.length} edge types`
     )
 
-    // Phase 9: Extract entities, relationships, and persist — one chunk at a time
-    for (const chunkId of chunkIds) {
-      const chunkContent = await step.do(`load-chunk-content-${chunkId}`, async () => {
-        const chunk = await this.env.DB.prepare('SELECT content FROM text_chunk WHERE id = ?')
-          .bind(chunkId)
-          .first<{ content: string }>()
-        if (!chunk) throw new Error(`Chunk ${chunkId} not found`)
-        return chunk.content
-      })
+    // Phase 8: Extract entities + deduplicate + extract relationships + persist — all chunks in parallel
+    await Promise.allSettled(
+      chunkIds.map(async (chunkId) => {
+        const chunkContent = await step.do(`load-chunk-content-${chunkId}`, async () => {
+          const chunk = await this.env.DB.prepare('SELECT content FROM text_chunk WHERE id = ?')
+            .bind(chunkId)
+            .first<{ content: string }>()
+          if (!chunk) throw new Error(`Chunk ${chunkId} not found`)
+          return chunk.content
+        })
 
-      // Entity extraction: one step per node type
-      const rawEntities: ExtractedEntity[] = []
-      for (const nodeType of entityTypeContext.nodeTypes) {
+        // Entity extraction: one step per node type
+        const rawEntities: ExtractedEntity[] = []
+        for (const nodeType of entityTypeContext.nodeTypes) {
+          const entities = await step.do(
+            `extract-entities-${chunkId}-${nodeType.name}`,
+            async (): Promise<ExtractedEntity[]> =>
+              extractEntitiesForNodeTypes(chunkContent, [nodeType], this.env)
+          )
+          console.log(`[ingest] Chunk ${chunkId} / ${nodeType.name}: ${entities.length} entities`)
+          rawEntities.push(...entities)
+        }
+
+        // LLM entity deduplication
         const entities = await step.do(
-          `extract-entities-${chunkId}-${nodeType.name}`,
+          `deduplicate-entities-${chunkId}`,
           async (): Promise<ExtractedEntity[]> =>
-            extractEntitiesForNodeTypes(chunkContent, [nodeType], this.env)
+            deduplicateEntitiesLLM(chunkContent, rawEntities, this.env)
         )
-        console.log(`[ingest] Chunk ${chunkId} / ${nodeType.name}: ${entities.length} entities`)
-        rawEntities.push(...entities)
-      }
-
-      const entities = removeOverlaps(rawEntities)
-      console.log(
-        `[ingest] Chunk ${chunkId}: ${entities.length} entities after overlap removal (${rawEntities.length} raw)`
-      )
-
-      // Relationship extraction: one step per edge type
-      const relationships: ExtractedRelationship[] = []
-      if (entities.length > 0 && entityTypeContext.edgeTypes.length > 0) {
-        for (const edgeType of entityTypeContext.edgeTypes) {
-          const rels = await step.do(
-            `extract-relationships-${chunkId}-${edgeType.name}`,
-            async (): Promise<ExtractedRelationship[]> =>
-              extractRelationshipsForEdgeType(chunkContent, entities, edgeType, this.env)
-          )
-          console.log(`[ingest] Chunk ${chunkId} / ${edgeType.name}: ${rels.length} relationships`)
-          relationships.push(...rels)
-        }
-      }
-
-      // Persist entities + relationships for this chunk
-      await step.do(`persist-entities-${chunkId}`, async () => {
         console.log(
-          `[ingest] Chunk ${chunkId}: persisting ${entities.length} entities + ${relationships.length} relationships`
+          `[ingest] Chunk ${chunkId}: ${entities.length} entities after dedup (${rawEntities.length} raw)`
         )
-        const statements: D1PreparedStatement[] = []
 
-        if (entities.length > 0) {
-          const entityStmt = this.env.DB.prepare(
-            `INSERT OR IGNORE INTO extracted_entity
-              (source_document_id, source_chunk_id, entity_type, extracted_text,
-               chunk_start_index, chunk_end_index, scope)
-             VALUES (?, ?, ?, ?, ?, ?, ?)`
-          )
-          for (const entity of entities) {
-            statements.push(
-              entityStmt.bind(
-                documentId,
-                chunkId,
-                entity.nodeType,
-                entity.text,
-                entity.startIndex,
-                entity.endIndex,
-                'chunk'
-              )
+        // Relationship extraction: one step per edge type
+        const relationships: ExtractedRelationship[] = []
+        if (entities.length > 0 && entityTypeContext.edgeTypes.length > 0) {
+          for (const edgeType of entityTypeContext.edgeTypes) {
+            const rels = await step.do(
+              `extract-relationships-${chunkId}-${edgeType.name}`,
+              async (): Promise<ExtractedRelationship[]> =>
+                extractRelationshipsForEdgeType(chunkContent, entities, edgeType, this.env)
             )
+            console.log(`[ingest] Chunk ${chunkId} / ${edgeType.name}: ${rels.length} relationships`)
+            relationships.push(...rels)
           }
         }
 
-        if (relationships.length > 0) {
-          const relStmt = this.env.DB.prepare(
-            `INSERT OR IGNORE INTO extracted_relationship
-              (source_document_id, source_chunk_id, edge_type, from_entity_text, to_entity_text, scope)
-             VALUES (?, ?, ?, ?, ?, ?)`
+        // Persist entities + relationships for this chunk
+        await step.do(`persist-entities-${chunkId}`, async () => {
+          console.log(
+            `[ingest] Chunk ${chunkId}: persisting ${entities.length} entities + ${relationships.length} relationships`
           )
-          for (const rel of relationships) {
-            statements.push(
-              relStmt.bind(
-                documentId,
-                chunkId,
-                rel.edgeType,
-                rel.fromText,
-                rel.toText,
-                'chunk'
-              )
-            )
-          }
-        }
+          const statements: D1PreparedStatement[] = []
 
-        if (statements.length > 0) {
-          await this.env.DB.batch(statements)
-          console.log(`[ingest] Chunk ${chunkId}: batch succeeded (${statements.length} statements)`)
-        } else {
-          console.log(`[ingest] Chunk ${chunkId}: nothing to persist`)
-        }
+          if (entities.length > 0) {
+            const entityStmt = this.env.DB.prepare(
+              `INSERT OR IGNORE INTO extracted_entity
+                (source_document_id, source_chunk_id, entity_type, extracted_text,
+                 chunk_start_index, chunk_end_index, scope)
+               VALUES (?, ?, ?, ?, ?, ?, ?)`
+            )
+            for (const entity of entities) {
+              statements.push(
+                entityStmt.bind(
+                  documentId,
+                  chunkId,
+                  entity.nodeType,
+                  entity.text,
+                  entity.startIndex,
+                  entity.endIndex,
+                  'chunk'
+                )
+              )
+            }
+          }
+
+          if (relationships.length > 0) {
+            const relStmt = this.env.DB.prepare(
+              `INSERT OR IGNORE INTO extracted_relationship
+                (source_document_id, source_chunk_id, edge_type, from_entity_text, to_entity_text, scope)
+               VALUES (?, ?, ?, ?, ?, ?)`
+            )
+            for (const rel of relationships) {
+              statements.push(
+                relStmt.bind(
+                  documentId,
+                  chunkId,
+                  rel.edgeType,
+                  rel.fromText,
+                  rel.toText,
+                  'chunk'
+                )
+              )
+            }
+          }
+
+          if (statements.length > 0) {
+            await this.env.DB.batch(statements)
+            console.log(`[ingest] Chunk ${chunkId}: batch succeeded (${statements.length} statements)`)
+          } else {
+            console.log(`[ingest] Chunk ${chunkId}: nothing to persist`)
+          }
+        })
       })
-    }
+    )
+
+    // Phase 9: Initial translation draft (all chunks in parallel)
+    await Promise.allSettled(
+      chunkIds.map((chunkId) =>
+        step.do(`translate-chunk-initial-${chunkId}`, async () => {
+          const chunk = await this.env.DB.prepare('SELECT content FROM text_chunk WHERE id = ?')
+            .bind(chunkId)
+            .first<{ content: string }>()
+          if (!chunk) throw new Error(`Chunk ${chunkId} not found`)
+          await translateChunkInitialDraft(chunkId, documentId, chunk.content, this.env)
+        })
+      )
+    )
+
+    // Phase 10: Revised translation draft (all chunks in parallel)
+    await Promise.allSettled(
+      chunkIds.map((chunkId) =>
+        step.do(`translate-chunk-revision-${chunkId}`, async () => {
+          const chunk = await this.env.DB.prepare('SELECT content FROM text_chunk WHERE id = ?')
+            .bind(chunkId)
+            .first<{ content: string }>()
+          if (!chunk) throw new Error(`Chunk ${chunkId} not found`)
+          await translateChunkRevision(chunkId, documentId, chunk.content, this.env)
+        })
+      )
+    )
 
     return { documentId, chunkCount: chunkIds.length }
   }

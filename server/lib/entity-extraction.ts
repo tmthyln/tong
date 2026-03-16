@@ -160,6 +160,108 @@ function parseResponse(
 }
 
 /**
+ * Use an LLM to resolve entity type conflicts (overlapping spans tagged with multiple types).
+ * If no conflicts exist, returns entities as-is without making an LLM call.
+ * Falls back to longest-span rule for any conflict the LLM fails to resolve.
+ */
+export async function deduplicateEntitiesLLM(
+  chunkContent: string,
+  entities: ExtractedEntity[],
+  env: Env
+): Promise<ExtractedEntity[]> {
+  // Find conflict groups: entities whose spans overlap with entities of a different type
+  const sorted = [...entities].sort((a, b) => {
+    if (a.startIndex !== b.startIndex) return a.startIndex - b.startIndex
+    return (b.endIndex - b.startIndex) - (a.endIndex - a.startIndex)
+  })
+
+  // Group overlapping entities together
+  const conflictGroups: ExtractedEntity[][] = []
+  const nonConflicting: ExtractedEntity[] = []
+
+  let i = 0
+  while (i < sorted.length) {
+    const group = [sorted[i]]
+    let j = i + 1
+    while (j < sorted.length && sorted[j].startIndex < sorted[i].endIndex) {
+      group.push(sorted[j])
+      j++
+    }
+    if (group.length > 1) {
+      conflictGroups.push(group)
+      i = j
+    } else {
+      nonConflicting.push(sorted[i])
+      i++
+    }
+  }
+
+  if (conflictGroups.length === 0) {
+    return entities
+  }
+
+  // Build LLM prompt for all conflict groups
+  const conflictDescriptions = conflictGroups.map((group, idx) => {
+    const span = chunkContent.slice(group[0].startIndex, Math.max(...group.map(e => e.endIndex)))
+    const candidates = group.map(e => e.nodeType).join(', ')
+    return `${idx + 1}. "${span}" spans [${group[0].startIndex},${Math.max(...group.map(e => e.endIndex))}]: candidates: [${candidates}]`
+  })
+
+  const systemPrompt = `You resolve entity type conflicts in Chinese text extraction.
+Return JSON: { "resolutions": [{ "text": "...", "nodeType": "..." }] }`
+
+  const userPrompt = `Text: "${chunkContent}"
+
+Resolve these conflicts (each group has overlapping spans — pick exactly one):
+${conflictDescriptions.join('\n')}
+
+Reply with JSON { "resolutions": [ { "text": "<exact text>", "nodeType": "<chosen type>" } ] }`
+
+  let resolved: Array<{ text: string; nodeType: string }> = []
+  try {
+    const result = await env.AI.run(MODEL, {
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: userPrompt },
+      ],
+      temperature: 0,
+      response_format: { type: 'json_object' },
+    })
+
+    let parsed: { resolutions?: Array<{ text: string; nodeType: string }> } | null = null
+    if ('response' in result && typeof result.response === 'string') {
+      parsed = JSON.parse(result.response)
+    } else if ('response' in result && result.response && typeof result.response === 'object') {
+      parsed = result.response as typeof parsed
+    }
+    if (parsed?.resolutions && Array.isArray(parsed.resolutions)) {
+      resolved = parsed.resolutions
+    }
+  } catch (err) {
+    console.warn('[entity-extraction] deduplicateEntitiesLLM LLM call failed:', err)
+  }
+
+  // Resolve each conflict group
+  const resolvedEntities: ExtractedEntity[] = [...nonConflicting]
+
+  for (const group of conflictGroups) {
+    const groupText = chunkContent.slice(group[0].startIndex, Math.max(...group.map(e => e.endIndex)))
+    const llmResolution = resolved.find((r) => r.text === groupText)
+
+    if (llmResolution) {
+      // Find the entity in the group matching the chosen type
+      const chosen = group.find((e) => e.nodeType === llmResolution.nodeType) ?? group[0]
+      resolvedEntities.push(chosen)
+    } else {
+      // Fallback: longest span (first in sorted order since we sorted longest-first)
+      resolvedEntities.push(group[0])
+    }
+  }
+
+  return resolvedEntities.sort((a, b) => a.startIndex - b.startIndex)
+}
+
+/**
  * Remove overlapping entities from a sorted list, preferring longer spans.
  * When two entities overlap, the longer one is kept.
  * If equal length, the one encountered first is kept.
