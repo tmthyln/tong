@@ -73,7 +73,7 @@ function renderChunk(chunk: Chunk): string {
     const before = content.slice(0, e.startIndex)
     const text = content.slice(e.startIndex, e.endIndex)
     const after = content.slice(e.endIndex)
-    content = `${before}<span class="entity-underline" title="${tooltip.replace(/"/g, '&quot;')}">${text}</span>${after}`
+    content = `${before}<span class="entity-underline" data-entity-id="${e.id}" title="${tooltip.replace(/"/g, '&quot;')}">${text}</span>${after}`
   }
 
   return marked(content) as string
@@ -117,6 +117,20 @@ async function fetchDocument() {
   } finally {
     loading.value = false
   }
+}
+
+// ── Entity highlighting ───────────────────────────────────────────────────────
+
+const activeEntityId   = ref<number | null>(null)
+const activeEntityText = ref<string | null>(null)
+
+function applyEntityHighlights() {
+  window.document.querySelectorAll<HTMLElement>('.entity-underline').forEach((el) => {
+    const matches =
+      (activeEntityId.value != null && Number(el.dataset.entityId) === activeEntityId.value) ||
+      (activeEntityText.value != null && el.textContent?.trim() === activeEntityText.value)
+    el.classList.toggle('entity-underline--highlighted', matches)
+  })
 }
 
 // ── Selection toolbar & inline dictionary lookup ──────────────────────────────
@@ -189,7 +203,14 @@ const toolbarStyle = computed(() => {
   }
 })
 
-// Clamp the popup so it stays fully within the viewport.
+// Height of the fixed app bar — read from the DOM so it stays correct if
+// Vuetify ever changes its default or the bar is resized.
+function appBarHeight(): number {
+  const bar = window.document.querySelector('.v-app-bar')
+  return bar ? bar.getBoundingClientRect().height : 64
+}
+
+// Clamp the popup so it stays fully within the viewport and below the app bar.
 function clampToViewport() {
   const el = toolbarRef.value
   if (!el) return
@@ -201,14 +222,15 @@ function clampToViewport() {
     toolbar.value.y = rect.top
   }
   const margin = 8
+  const topMin = appBarHeight() + margin
   if (rect.right > window.innerWidth - margin)
     toolbar.value.x -= rect.right - (window.innerWidth - margin)
   if (rect.left < margin)
     toolbar.value.x += margin - rect.left
   if (rect.bottom > window.innerHeight - margin)
     toolbar.value.y -= rect.bottom - (window.innerHeight - margin)
-  if (rect.top < margin)
-    toolbar.value.y += margin - rect.top
+  if (rect.top < topMin)
+    toolbar.value.y += topMin - rect.top
 }
 
 // Re-clamp whenever the explanation text loads (popup height grows).
@@ -255,7 +277,25 @@ function onDragEnd() {
   window.removeEventListener('pointermove', onDragMove)
 }
 
+function onContentDblClick(e: MouseEvent) {
+  const target = (e.target as Element).closest('.entity-underline')
+  if (!target) return
+  const sel = window.getSelection()
+  if (!sel) return
+  const range = window.document.createRange()
+  range.selectNodeContents(target)
+  sel.removeAllRanges()
+  sel.addRange(range)
+  activeEntityId.value   = Number((target as HTMLElement).dataset.entityId) || null
+  activeEntityText.value = target.textContent?.trim() ?? null
+  applyEntityHighlights()
+}
+
 function onContentMouseUp() {
+  // Defer until after dblclick fires. On a double-click the event order is
+  // mouseup → dblclick, so a setTimeout(0) lets onContentDblClick correct the
+  // selection to the full entity span before we read it here.
+  setTimeout(() => {
   const sel = window.getSelection()
   if (!sel || sel.isCollapsed || !sel.toString().trim()) return
   const text = sel.toString().trim()
@@ -277,11 +317,17 @@ function onContentMouseUp() {
     chunkId, explanation: null, explainLoading: false,
     disambiguateLoading: false, disambiguatedEntryId: null,
   }
+  }, 0)
 }
 
 function onDocumentMouseDown(e: MouseEvent) {
   if (toolbarRef.value?.contains(e.target as Node)) return
   toolbar.value.show = false
+  if (!(e.target as Element).closest?.('.entity-underline')) {
+    activeEntityId.value   = null
+    activeEntityText.value = null
+    applyEntityHighlights()
+  }
 }
 
 async function lookupInDictionary() {
@@ -411,7 +457,7 @@ onUnmounted(() => {
       </v-row>
 
       <!-- Normal reading view -->
-      <v-card v-if="!translationMode" @mouseup="onContentMouseUp">
+      <v-card v-if="!translationMode" @mouseup="onContentMouseUp" @dblclick="onContentDblClick">
         <v-card-text class="document-content">
           <div
             v-for="chunk in document.chunks"
@@ -423,7 +469,7 @@ onUnmounted(() => {
       </v-card>
 
       <!-- Translation view: card behind original text only, textareas float on right -->
-      <div v-else class="translation-layout" @mouseup="onContentMouseUp">
+      <div v-else class="translation-layout" @mouseup="onContentMouseUp" @dblclick="onContentDblClick">
         <v-card class="translation-text-card" />
         <div class="translation-grid">
           <template v-for="chunk in document.chunks" :key="chunk.id">
@@ -668,9 +714,13 @@ onUnmounted(() => {
 }
 
 .document-content :deep(.entity-underline) {
-  text-decoration: underline;
-  text-decoration-color: rgb(var(--v-theme-primary));
-  text-underline-offset: 3px;
   cursor: help;
+  font-weight: 600;
+}
+
+.document-content :deep(.entity-underline--highlighted) {
+  background: rgba(var(--v-theme-primary), 0.35);
+  outline: 1px solid rgba(var(--v-theme-primary), 0.6);
+  border-radius: 2px;
 }
 </style>
