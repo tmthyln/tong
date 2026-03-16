@@ -11,6 +11,7 @@ interface Entity {
   endIndex: number | null
   label: string | null
   scope: string
+  parentId: number | null
 }
 
 interface Chunk {
@@ -123,13 +124,36 @@ async function fetchDocument() {
 
 const activeEntityId   = ref<number | null>(null)
 const activeEntityText = ref<string | null>(null)
+const activeParentId   = ref<number | null>(null)
+
+// Map from chunk entity id → entity, built from all chunks
+const entityById = computed<Map<number, Entity>>(() => {
+  const map = new Map<number, Entity>()
+  for (const chunk of document.value?.chunks ?? []) {
+    for (const e of chunk.entities) {
+      map.set(e.id, e)
+    }
+  }
+  return map
+})
 
 function applyEntityHighlights() {
   window.document.querySelectorAll<HTMLElement>('.entity-underline').forEach((el) => {
-    const matches =
-      (activeEntityId.value != null && Number(el.dataset.entityId) === activeEntityId.value) ||
-      (activeEntityText.value != null && el.textContent?.trim() === activeEntityText.value)
-    el.classList.toggle('entity-underline--highlighted', matches)
+    const id = Number(el.dataset.entityId)
+    let primary = false
+    let solo = false
+
+    if (activeParentId.value != null) {
+      // Has a document-level parent: highlight all siblings sharing that parent
+      const entity = entityById.value.get(id)
+      primary = entity?.parentId === activeParentId.value
+    } else if (activeEntityText.value != null) {
+      // No parent: highlight exact text matches with reddish style
+      solo = el.textContent?.trim() === activeEntityText.value
+    }
+
+    el.classList.toggle('entity-underline--highlighted', primary)
+    el.classList.toggle('entity-underline--highlighted-solo', solo)
   })
 }
 
@@ -286,8 +310,10 @@ function onContentDblClick(e: MouseEvent) {
   range.selectNodeContents(target)
   sel.removeAllRanges()
   sel.addRange(range)
-  activeEntityId.value   = Number((target as HTMLElement).dataset.entityId) || null
+  const clickedId        = Number((target as HTMLElement).dataset.entityId) || null
+  activeEntityId.value   = clickedId
   activeEntityText.value = target.textContent?.trim() ?? null
+  activeParentId.value   = clickedId != null ? (entityById.value.get(clickedId)?.parentId ?? null) : null
   applyEntityHighlights()
 }
 
@@ -326,6 +352,7 @@ function onDocumentMouseDown(e: MouseEvent) {
   if (!(e.target as Element).closest?.('.entity-underline')) {
     activeEntityId.value   = null
     activeEntityText.value = null
+    activeParentId.value   = null
     applyEntityHighlights()
   }
 }
@@ -723,6 +750,12 @@ onUnmounted(() => {
 .document-content :deep(.entity-underline--highlighted) {
   background: rgba(var(--v-theme-primary), 0.35);
   outline: 1px solid rgba(var(--v-theme-primary), 0.6);
+  border-radius: 2px;
+}
+
+.document-content :deep(.entity-underline--highlighted-solo) {
+  background: rgba(var(--v-theme-error), 0.25);
+  outline: 1px solid rgba(var(--v-theme-error), 0.5);
   border-radius: 2px;
 }
 </style>
