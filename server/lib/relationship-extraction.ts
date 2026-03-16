@@ -49,20 +49,14 @@ If no relationships of this type are found, return: {"relationships": []}
 
 Example response format: {"relationships": [{"from": "北京", "to": "中国"}]}`
 
-  let result: AiTextGenerationOutput
-  try {
-    result = await env.AI.run(MODEL, {
-      messages: [
-        { role: 'system' as const, content: systemPrompt },
-        { role: 'user' as const, content: chunkContent },
-      ],
-      temperature: 0,
-      response_format: { type: 'json_object' },
-    })
-  } catch (err) {
-    console.warn(`[relationship-extraction] AI.run failed for ${edgeType.name}:`, err)
-    return []
-  }
+  const result = await env.AI.run(MODEL, {
+    messages: [
+      { role: 'system' as const, content: systemPrompt },
+      { role: 'user' as const, content: chunkContent },
+    ],
+    temperature: 0,
+    response_format: { type: 'json_object' },
+  })
 
   return parseResponse(result, entities, edgeType.name)
 }
@@ -105,6 +99,5 @@ function parseResponse(
     }
   }
 
-  console.log(`[relationship-extraction] ${edgeTypeName}: ${relationships.length} relationships`)
   return relationships
 }

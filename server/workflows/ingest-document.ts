@@ -9,6 +9,8 @@ import type { NodeTypeInput, ExtractedEntity } from '../lib/entity-extraction'
 import { extractRelationshipsForEdgeType } from '../lib/relationship-extraction'
 import type { EdgeTypeInput, ExtractedRelationship } from '../lib/relationship-extraction'
 
+const LLM_STEP_RETRIES = { retries: { limit: 4, delay: '5 second', backoff: 'exponential' } } as const
+
 interface IngestDocumentParams {
   location: string
   filename: string
@@ -232,10 +234,10 @@ export class IngestDocumentWorkflow extends WorkflowEntrypoint<Env, IngestDocume
         for (const nodeType of entityTypeContext.nodeTypes) {
           const entities = await step.do(
             `extract-entities-${chunkId}-${nodeType.name}`,
+            LLM_STEP_RETRIES,
             async (): Promise<ExtractedEntity[]> =>
               extractEntitiesForNodeTypes(chunkContent, [nodeType], this.env)
           )
-          console.log(`[ingest] Chunk ${chunkId} / ${nodeType.name}: ${entities.length} entities`)
           rawEntities.push(...entities)
         }
 
@@ -245,20 +247,16 @@ export class IngestDocumentWorkflow extends WorkflowEntrypoint<Env, IngestDocume
           async (): Promise<ExtractedEntity[]> =>
             deduplicateEntitiesLLM(chunkContent, rawEntities, this.env)
         )
-        console.log(
-          `[ingest] Chunk ${chunkId}: ${entities.length} entities after dedup (${rawEntities.length} raw)`
-        )
-
         // Relationship extraction: one step per edge type
         const relationships: ExtractedRelationship[] = []
         if (entities.length > 0 && entityTypeContext.edgeTypes.length > 0) {
           for (const edgeType of entityTypeContext.edgeTypes) {
             const rels = await step.do(
               `extract-relationships-${chunkId}-${edgeType.name}`,
+              LLM_STEP_RETRIES,
               async (): Promise<ExtractedRelationship[]> =>
                 extractRelationshipsForEdgeType(chunkContent, entities, edgeType, this.env)
             )
-            console.log(`[ingest] Chunk ${chunkId} / ${edgeType.name}: ${rels.length} relationships`)
             relationships.push(...rels)
           }
         }
@@ -266,7 +264,7 @@ export class IngestDocumentWorkflow extends WorkflowEntrypoint<Env, IngestDocume
         // Persist entities + relationships for this chunk
         await step.do(`persist-entities-${chunkId}`, async () => {
           console.log(
-            `[ingest] Chunk ${chunkId}: persisting ${entities.length} entities + ${relationships.length} relationships`
+            `[ingest] Chunk ${chunkId}: ${entities.length} entities (${rawEntities.length} raw), ${relationships.length} relationships`
           )
           const statements: D1PreparedStatement[] = []
 
@@ -314,9 +312,6 @@ export class IngestDocumentWorkflow extends WorkflowEntrypoint<Env, IngestDocume
 
           if (statements.length > 0) {
             await this.env.DB.batch(statements)
-            console.log(`[ingest] Chunk ${chunkId}: batch succeeded (${statements.length} statements)`)
-          } else {
-            console.log(`[ingest] Chunk ${chunkId}: nothing to persist`)
           }
         })
       })
@@ -325,7 +320,7 @@ export class IngestDocumentWorkflow extends WorkflowEntrypoint<Env, IngestDocume
     // Phase 9: Initial translation draft (all chunks in parallel)
     await Promise.allSettled(
       chunkIds.map((chunkId) =>
-        step.do(`translate-chunk-initial-${chunkId}`, async () => {
+        step.do(`translate-chunk-initial-${chunkId}`, LLM_STEP_RETRIES, async () => {
           const chunk = await this.env.DB.prepare('SELECT content FROM text_chunk WHERE id = ?')
             .bind(chunkId)
             .first<{ content: string }>()
@@ -338,7 +333,7 @@ export class IngestDocumentWorkflow extends WorkflowEntrypoint<Env, IngestDocume
     // Phase 10: Revised translation draft (all chunks in parallel)
     await Promise.allSettled(
       chunkIds.map((chunkId) =>
-        step.do(`translate-chunk-revision-${chunkId}`, async () => {
+        step.do(`translate-chunk-revision-${chunkId}`, LLM_STEP_RETRIES, async () => {
           const chunk = await this.env.DB.prepare('SELECT content FROM text_chunk WHERE id = ?')
             .bind(chunkId)
             .first<{ content: string }>()

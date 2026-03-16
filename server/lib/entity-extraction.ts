@@ -26,23 +26,11 @@ export async function extractEntitiesForNodeTypes(
   const allEntities: ExtractedEntity[] = []
 
   for (const nodeType of nodeTypes) {
-    console.log(`[entity-extraction] Calling AI for ${nodeType.name}...`)
     const messages = buildMessages(chunkContent, nodeType)
 
-    let result: AiTextGenerationOutput
-    try {
-      result = await env.AI.run(MODEL, {
-        messages,
-        temperature: 0,
-        response_format: { type: 'json_object' },
-      })
-    } catch (err) {
-      console.warn(`[entity-extraction] AI.run failed for ${nodeType.name}:`, err)
-      continue
-    }
+    const result = await env.AI.run(MODEL, { messages, temperature: 0, response_format: { type: 'json_object' } })
 
     const entities = parseResponse(result, chunkContent, nodeType.name)
-    console.log(`[entity-extraction] ${nodeType.name}: ${entities.length} entities`)
     allEntities.push(...entities)
   }
 
@@ -238,7 +226,8 @@ Reply with JSON { "resolutions": [ { "text": "<exact text>", "nodeType": "<chose
       resolved = parsed.resolutions
     }
   } catch (err) {
-    console.warn('[entity-extraction] deduplicateEntitiesLLM LLM call failed:', err)
+    console.warn('[entity-extraction] deduplicateEntitiesLLM LLM call failed, falling back to longest-span:', err)
+    // Non-fatal: fall back to longest-span for all conflict groups
   }
 
   // Resolve each conflict group
