@@ -1,5 +1,7 @@
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const MODEL = '@cf/meta/llama-3.3-70b-instruct-fp8-fast' as any
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const MT_MODEL = '@cf/meta/m2m100-1.2b' as any
 
 const SYSTEM_PROMPT = `You are a literary translator. Translate the target Chinese text into fluent English.
 Preserve names, titles, and proper nouns in their Chinese form (pinyin or romanisation).
@@ -190,15 +192,58 @@ async function storeTranslation(
   chunkId: number,
   content: string,
   draftNumber: number,
-  env: Env
+  env: Env,
+  translator = 'ai:llama3'
 ): Promise<void> {
   const now = new Date().toISOString()
   await env.DB.prepare(
     `INSERT INTO translation_chunk (text_chunk_id, content, translator, draft_number, date_created, date_last_modified)
      VALUES (?, ?, ?, ?, ?, ?)`
   )
-    .bind(chunkId, content, 'ai:llama3', draftNumber, now, now)
+    .bind(chunkId, content, translator, draftNumber, now, now)
     .run()
+}
+
+function buildLLMWithMTMessages(
+  content: string,
+  preceding: Array<{ content: string }>,
+  following: Array<{ content: string }>,
+  similar: Array<{ content: string; translation: string }>,
+  mtTranslation: string | null
+) {
+  const parts: string[] = []
+
+  if (preceding.length > 0) {
+    parts.push('=== Preceding context ===')
+    parts.push(preceding.map((c) => c.content).join('\n'))
+  }
+
+  parts.push('=== Text to translate ===')
+  parts.push(content)
+
+  if (following.length > 0) {
+    parts.push('=== Following context ===')
+    parts.push(following.map((c) => c.content).join('\n'))
+  }
+
+  if (similar.length > 0) {
+    parts.push('=== Similar passages (with translations) ===')
+    parts.push(similar.map((s) => `${s.content} → ${s.translation}`).join('\n'))
+  }
+
+  if (mtTranslation) {
+    parts.push('=== Machine translation reference ===')
+    parts.push(mtTranslation)
+  }
+
+  parts.push(
+    '\nTranslate only the "Text to translate" section. Use the machine translation as a reference for vocabulary and proper nouns, but produce a fluent, literary translation.'
+  )
+
+  return [
+    { role: 'system' as const, content: SYSTEM_PROMPT },
+    { role: 'user' as const, content: parts.join('\n\n') },
+  ]
 }
 
 export async function translateChunkInitialDraft(
@@ -259,4 +304,49 @@ export async function translateChunkRevision(
   )
   const translation = await runTranslation(messages, env)
   await storeTranslation(chunkId, translation, 2, env)
+}
+
+// draft_number = -1: raw machine translation baseline
+export async function translateChunkMTBaseline(
+  chunkId: number,
+  content: string,
+  env: Env
+): Promise<void> {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const result = await (env.AI as any).run(MT_MODEL, {
+    text: content,
+    source_lang: 'chinese',
+    target_lang: 'english',
+  })
+
+  const text =
+    result && typeof result === 'object' && 'translated_text' in result
+      ? (result.translated_text as string)
+      : undefined
+  if (!text) throw new Error('MT baseline failed: no translation returned')
+  await storeTranslation(chunkId, text.trim(), -1, env, 'mt:m2m100')
+}
+
+// draft_number = 0: LLM translation with MT output as reference context
+export async function translateChunkLLMWithMTContext(
+  chunkId: number,
+  documentId: number,
+  content: string,
+  env: Env
+): Promise<void> {
+  const [{ preceding, following }, mtRow] = await Promise.all([
+    fetchSurroundingChunks(documentId, chunkId, env),
+    env.DB.prepare(
+      'SELECT content FROM translation_chunk WHERE text_chunk_id = ? AND draft_number = -1 LIMIT 1'
+    )
+      .bind(chunkId)
+      .first<{ content: string }>(),
+  ])
+
+  const excludeIds = [chunkId, ...preceding.map((c) => c.id), ...following.map((c) => c.id)]
+  const similar = await fetchSimilarChunksWithTranslations(chunkId, content, excludeIds, env)
+
+  const messages = buildLLMWithMTMessages(content, preceding, following, similar, mtRow?.content ?? null)
+  const translation = await runTranslation(messages, env)
+  await storeTranslation(chunkId, translation, 0, env, 'ai:llama3-mt')
 }

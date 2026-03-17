@@ -3,7 +3,12 @@ import { extractContent, loadExtractedContent } from '../lib/extract-content'
 import { countChineseCharacters } from '../lib/chinese-utils'
 import { generateChunkIndices } from '../lib/chunking'
 import { embedAndStoreChunk } from '../lib/embedding'
-import { translateChunkInitialDraft, translateChunkRevision } from '../lib/translation'
+import {
+  translateChunkMTBaseline,
+  translateChunkLLMWithMTContext,
+  translateChunkInitialDraft,
+  translateChunkRevision,
+} from '../lib/translation'
 import { extractEntitiesForNodeTypes, deduplicateEntitiesLLM } from '../lib/entity-extraction'
 import type { NodeTypeInput, ExtractedEntity } from '../lib/entity-extraction'
 import { extractRelationshipsForEdgeType } from '../lib/relationship-extraction'
@@ -535,6 +540,34 @@ export class IngestDocumentWorkflow extends WorkflowEntrypoint<Env, IngestDocume
         )
       })
     }
+
+    // Phase 8.9a: MT baseline translation (draft_number = -1)
+    await Promise.allSettled(
+      chunkIds.map((chunkId) =>
+        step.do(`translate-chunk-mt-baseline-${chunkId}`, LLM_STEP_RETRIES, async () => {
+          const chunk = await this.env.DB.prepare('SELECT content FROM text_chunk WHERE id = ?')
+            .bind(chunkId)
+            .first<{ content: string }>()
+          if (!chunk) throw new Error(`Chunk ${chunkId} not found`)
+          await translateChunkMTBaseline(chunkId, chunk.content, this.env)
+        })
+      )
+    )
+    console.log(`[ingest] Document ${documentId}: Phase 8.9a complete — ${chunkIds.length} chunks MT baseline translated`)
+
+    // Phase 8.9b: LLM+MT context baseline translation (draft_number = 0)
+    await Promise.allSettled(
+      chunkIds.map((chunkId) =>
+        step.do(`translate-chunk-llm-mt-baseline-${chunkId}`, LLM_STEP_RETRIES, async () => {
+          const chunk = await this.env.DB.prepare('SELECT content FROM text_chunk WHERE id = ?')
+            .bind(chunkId)
+            .first<{ content: string }>()
+          if (!chunk) throw new Error(`Chunk ${chunkId} not found`)
+          await translateChunkLLMWithMTContext(chunkId, documentId, chunk.content, this.env)
+        })
+      )
+    )
+    console.log(`[ingest] Document ${documentId}: Phase 8.9b complete — ${chunkIds.length} chunks LLM+MT baseline translated`)
 
     // Phase 9: Initial translation draft (all chunks in parallel)
     await Promise.allSettled(
