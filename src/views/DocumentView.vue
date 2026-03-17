@@ -198,7 +198,7 @@ const toolbar = ref({
   x:              0,   // fixed left of popup (px)
   y:              0,   // fixed top of popup (px)
   text:           '',
-  mode:           'actions' as 'actions' | 'dictionary',
+  mode:           'actions' as 'actions' | 'dictionary' | 'entity',
   results:        [] as DictEntry[],
   loading:        false,
   error:          null as string | null,
@@ -207,6 +207,8 @@ const toolbar = ref({
   explainLoading:       false,
   disambiguateLoading:  false,
   disambiguatedEntryId: null as number | null,
+  entitySummaryLoading: false as boolean,
+  entitySummary:        null as string | null,
 })
 
 const POPUP_W = 320
@@ -258,8 +260,13 @@ function clampToViewport() {
     toolbar.value.y += topMin - rect.top
 }
 
-// Re-clamp whenever the explanation text loads (popup height grows).
+// Re-clamp whenever the explanation or entity summary loads (popup height grows).
 watch(() => toolbar.value.explanation, async (val) => {
+  if (!val) return
+  await nextTick()
+  clampToViewport()
+})
+watch(() => toolbar.value.entitySummary, async (val) => {
   if (!val) return
   await nextTick()
   clampToViewport()
@@ -343,6 +350,7 @@ function onContentMouseUp() {
     mode: 'actions', results: [], loading: false, error: null,
     chunkId, explanation: null, explainLoading: false,
     disambiguateLoading: false, disambiguatedEntryId: null,
+    entitySummaryLoading: false, entitySummary: null,
   }
   }, 0)
 }
@@ -421,6 +429,29 @@ async function disambiguate() {
     toolbar.value.error = e instanceof Error ? e.message : 'Disambiguate failed'
   } finally {
     toolbar.value.disambiguateLoading = false
+  }
+}
+
+async function summarizeEntity() {
+  if (!document.value || activeEntityId.value == null) return
+  toolbarDragged.value = false  // re-center on switch
+  toolbar.value.mode = 'entity'
+  toolbar.value.entitySummaryLoading = true
+  toolbar.value.entitySummary = null
+  toolbar.value.error = null
+  try {
+    const res = await fetch('/api/knowledge/document-entity-summary', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ documentId: document.value.id, entityId: activeEntityId.value }),
+    })
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    const data = await res.json() as { summary: string }
+    toolbar.value.entitySummary = data.summary
+  } catch (e) {
+    toolbar.value.error = e instanceof Error ? e.message : 'Summary failed'
+  } finally {
+    toolbar.value.entitySummaryLoading = false
   }
 }
 
@@ -539,6 +570,42 @@ onUnmounted(() => {
         >
           Define
         </v-btn>
+        <v-btn
+          v-if="activeEntityId != null"
+          size="small"
+          variant="text"
+          prepend-icon="mdi-information-outline"
+          @click="summarizeEntity"
+        >
+          Summarize
+        </v-btn>
+      </v-card>
+
+      <!-- Entity mode: in-context entity summary -->
+      <v-card v-else-if="toolbar.mode === 'entity'" elevation="8" rounded="lg" style="width: 320px;">
+        <div class="d-flex align-center px-3 pt-2 pb-1 popup-header" @pointerdown="onHeaderPointerDown">
+          <span class="text-body-1 font-weight-medium">{{ toolbar.text }}</span>
+          <v-spacer />
+          <v-btn icon="mdi-close" variant="text" size="x-small" @click="toolbar.show = false" @pointerdown.stop />
+        </div>
+        <v-divider />
+
+        <div v-if="toolbar.entitySummaryLoading" class="d-flex justify-center py-5">
+          <v-progress-circular indeterminate color="primary" size="24" />
+        </div>
+
+        <v-alert
+          v-else-if="toolbar.error"
+          type="error"
+          variant="tonal"
+          density="compact"
+          class="ma-2"
+          :text="toolbar.error"
+        />
+
+        <div v-else-if="toolbar.entitySummary" class="text-body-2 pa-3">
+          {{ toolbar.entitySummary }}
+        </div>
       </v-card>
 
       <!-- Dictionary mode: results inline -->
