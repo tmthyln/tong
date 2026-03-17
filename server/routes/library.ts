@@ -434,6 +434,24 @@ libraryRoutes.get('/document/:id', async (c) => {
     toType: r.to_type,
   }))
 
+  // Fetch latest translation draft for each chunk
+  const translationsByChunkId: Record<number, string> = {}
+  if (chunkIds.length > 0) {
+    const translationsResult = await c.env.DB.prepare(
+      `SELECT text_chunk_id, content
+       FROM translation_chunk
+       WHERE text_chunk_id IN (SELECT id FROM text_chunk WHERE source_document_id = ?)
+       GROUP BY text_chunk_id
+       HAVING draft_number = MAX(draft_number)`
+    )
+      .bind(id)
+      .all<{ text_chunk_id: number; content: string }>()
+
+    for (const row of translationsResult.results) {
+      translationsByChunkId[row.text_chunk_id] = row.content
+    }
+  }
+
   // Map chunks with their entities
   const chunks = chunksResult.results.map((chunk) => ({
     id: chunk.id,
@@ -444,6 +462,7 @@ libraryRoutes.get('/document/:id', async (c) => {
     charCount: chunk.char_count,
     uniqueCharCount: chunk.unique_char_count,
     entities: entitiesByChunkId[chunk.id] || [],
+    translation: translationsByChunkId[chunk.id] ?? null,
   }))
 
   return c.json({

@@ -23,6 +23,7 @@ interface Chunk {
   charCount: number
   uniqueCharCount: number
   entities: Entity[]
+  translation: string | null
 }
 
 interface Document {
@@ -84,7 +85,7 @@ function initTranslations() {
   if (!document.value) return
   for (const chunk of document.value.chunks) {
     if (!(chunk.id in translations.value)) {
-      translations.value[chunk.id] = ''
+      translations.value[chunk.id] = chunk.translation ?? ''
     }
   }
 }
