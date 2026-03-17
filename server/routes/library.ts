@@ -333,26 +333,70 @@ libraryRoutes.get('/document/:id', async (c) => {
     }
   }
 
-  // Fetch document-scope entities
-  const allEntitiesResult = await c.env.DB.prepare(
-    `SELECT id, source_chunk_id, entity_type, extracted_text,
-            chunk_start_index, chunk_end_index, label, scope, parent_id
-     FROM extracted_entity
-     WHERE source_document_id = ? AND scope = 'document'
-     ORDER BY id`
-  )
-    .bind(id)
-    .all<{
-      id: number
-      source_chunk_id: number | null
-      entity_type: string
-      extracted_text: string | null
-      chunk_start_index: number | null
-      chunk_end_index: number | null
-      label: string | null
-      scope: string
-      parent_id: number | null
-    }>()
+  // Fetch document-scope entities + both relationship scopes in parallel
+  const [allEntitiesResult, chunkRelsResult, docRelsResult] = await Promise.all([
+    c.env.DB.prepare(
+      `SELECT id, source_chunk_id, entity_type, extracted_text,
+              chunk_start_index, chunk_end_index, label, scope, parent_id
+       FROM extracted_entity
+       WHERE source_document_id = ? AND scope = 'document'
+       ORDER BY id`
+    )
+      .bind(id)
+      .all<{
+        id: number
+        source_chunk_id: number | null
+        entity_type: string
+        extracted_text: string | null
+        chunk_start_index: number | null
+        chunk_end_index: number | null
+        label: string | null
+        scope: string
+        parent_id: number | null
+      }>(),
+    c.env.DB.prepare(
+      `SELECT er.id, er.from_entity_id, er.to_entity_id, er.edge_type, er.explanation,
+              fe.extracted_text AS from_text, fe.entity_type AS from_type,
+              te.extracted_text AS to_text, te.entity_type AS to_type
+       FROM extracted_relationship er
+       JOIN extracted_entity fe ON fe.id = er.from_entity_id
+       JOIN extracted_entity te ON te.id = er.to_entity_id
+       WHERE er.source_document_id = ? AND er.scope = 'chunk'`
+    )
+      .bind(id)
+      .all<{
+        id: number
+        from_entity_id: number
+        to_entity_id: number
+        edge_type: string
+        explanation: string | null
+        from_text: string | null
+        from_type: string
+        to_text: string | null
+        to_type: string
+      }>(),
+    c.env.DB.prepare(
+      `SELECT er.id, er.from_entity_id, er.to_entity_id, er.edge_type, er.explanation,
+              fe.label AS from_label, fe.entity_type AS from_type,
+              te.label AS to_label, te.entity_type AS to_type
+       FROM extracted_relationship er
+       JOIN extracted_entity fe ON fe.id = er.from_entity_id
+       JOIN extracted_entity te ON te.id = er.to_entity_id
+       WHERE er.source_document_id = ? AND er.scope = 'document'`
+    )
+      .bind(id)
+      .all<{
+        id: number
+        from_entity_id: number
+        to_entity_id: number
+        edge_type: string
+        explanation: string | null
+        from_label: string | null
+        from_type: string
+        to_label: string | null
+        to_type: string
+      }>(),
+  ])
 
   const entities = allEntitiesResult.results.map((e) => ({
     id: e.id,
@@ -364,6 +408,30 @@ libraryRoutes.get('/document/:id', async (c) => {
     label: e.label,
     scope: e.scope,
     parentId: e.parent_id,
+  }))
+
+  const chunkRelationships = chunkRelsResult.results.map((r) => ({
+    id: r.id,
+    fromEntityId: r.from_entity_id,
+    toEntityId: r.to_entity_id,
+    edgeType: r.edge_type,
+    explanation: r.explanation,
+    fromText: r.from_text,
+    fromType: r.from_type,
+    toText: r.to_text,
+    toType: r.to_type,
+  }))
+
+  const relationships = docRelsResult.results.map((r) => ({
+    id: r.id,
+    fromEntityId: r.from_entity_id,
+    toEntityId: r.to_entity_id,
+    edgeType: r.edge_type,
+    explanation: r.explanation,
+    fromLabel: r.from_label,
+    fromType: r.from_type,
+    toLabel: r.to_label,
+    toType: r.to_type,
   }))
 
   // Map chunks with their entities
@@ -392,6 +460,8 @@ libraryRoutes.get('/document/:id', async (c) => {
     extractedContent,
     entities,
     chunks,
+    chunkRelationships,
+    relationships,
   })
 })
 
