@@ -11,6 +11,8 @@ export interface ExtractedEntity {
   endIndex: number
 }
 
+import { extractJsonObject } from './llm-utils'
+
 const MODEL = '@cf/meta/llama-3.3-70b-instruct-fp8-fast' as BaseAiTextGenerationModels
 
 /**
@@ -28,7 +30,7 @@ export async function extractEntitiesForNodeTypes(
   for (const nodeType of nodeTypes) {
     const messages = buildMessages(chunkContent, nodeType)
 
-    const result = await env.AI.run(MODEL, { messages, temperature: 0, response_format: { type: 'json_object' } })
+    const result = await env.AI.run(MODEL, { messages, temperature: 0, max_tokens: 1024, response_format: { type: 'json_object' } })
 
     const entities = parseResponse(result, chunkContent, nodeType.name)
     allEntities.push(...entities)
@@ -89,7 +91,7 @@ function parseResponse(
   // Case 1: response is a string (parse as JSON)
   if ('response' in result && typeof result.response === 'string') {
     try {
-      parsed = JSON.parse(result.response)
+      parsed = JSON.parse(extractJsonObject(result.response))
     } catch (err) {
       console.warn(`[entity-extraction] JSON parse failed for ${nodeTypeName}:`, err)
       console.warn(`[entity-extraction] Raw response: ${result.response}`)
@@ -213,12 +215,13 @@ Reply with JSON { "resolutions": [ { "text": "<exact text>", "nodeType": "<chose
         { role: 'user', content: userPrompt },
       ],
       temperature: 0,
+      max_tokens: 1024,
       response_format: { type: 'json_object' },
     })
 
     let parsed: { resolutions?: Array<{ text: string; nodeType: string }> } | null = null
     if ('response' in result && typeof result.response === 'string') {
-      parsed = JSON.parse(result.response)
+      parsed = JSON.parse(extractJsonObject(result.response))
     } else if ('response' in result && result.response && typeof result.response === 'object') {
       parsed = result.response as typeof parsed
     }

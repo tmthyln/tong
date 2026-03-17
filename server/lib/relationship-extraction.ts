@@ -1,3 +1,5 @@
+import { extractJsonObject } from './llm-utils'
+
 export interface EdgeTypeInput {
   name: string
   reverseName: string | null
@@ -9,6 +11,7 @@ export interface ExtractedRelationship {
   edgeType: string
   fromText: string
   toText: string
+  explanation: string
 }
 
 const MODEL = '@cf/meta/llama-3.3-70b-instruct-fp8-fast' as BaseAiTextGenerationModels
@@ -43,11 +46,12 @@ ${entityList}
 Return a JSON object with a "relationships" array. Each relationship should have:
 - "from": exact text of the source entity (must match exactly from the entity list above)
 - "to": exact text of the target entity (must match exactly from the entity list above)
+- "explanation": brief reason why this relationship holds
 
 Only include relationships where both entities appear in the entity list. Do not invent entities.
 If no relationships of this type are found, return: {"relationships": []}
 
-Example response format: {"relationships": [{"from": "北京", "to": "中国"}]}`
+Example response format: {"relationships": [{"from": "北京", "to": "中国", "explanation": "北京 is the capital city of 中国"}]}`
 
   const result = await env.AI.run(MODEL, {
     messages: [
@@ -55,6 +59,7 @@ Example response format: {"relationships": [{"from": "北京", "to": "中国"}]}
       { role: 'user' as const, content: chunkContent },
     ],
     temperature: 0,
+    max_tokens: 2048,
     response_format: { type: 'json_object' },
   })
 
@@ -66,23 +71,28 @@ function parseResponse(
   entities: Array<{ text: string }>,
   edgeTypeName: string
 ): ExtractedRelationship[] {
-  let parsed: { relationships?: Array<{ from: string; to: string }> } | null = null
+  let parsed: { relationships?: Array<{ from: string; to: string; explanation?: string }> } | null = null
 
   if ('response' in result && typeof result.response === 'string') {
     try {
-      parsed = JSON.parse(result.response)
+      parsed = JSON.parse(extractJsonObject(result.response))
     } catch {
-      console.warn(`[relationship-extraction] JSON parse failed for ${edgeTypeName}`)
+      console.warn(`[relationship-extraction] JSON parse failed for ${edgeTypeName}:`, result.response)
       return []
     }
   } else if ('response' in result && result.response && typeof result.response === 'object') {
     parsed = result.response as typeof parsed
   } else {
-    console.warn(`[relationship-extraction] No valid response for ${edgeTypeName}`)
+    console.warn(`[relationship-extraction] No valid response for ${edgeTypeName}, result:`, JSON.stringify(result))
     return []
   }
 
-  if (!parsed?.relationships || !Array.isArray(parsed.relationships)) return []
+  if (!parsed) {
+    console.warn(`[relationship-extraction] Null parsed result for ${edgeTypeName}`)
+    return []
+  }
+
+  if (!parsed.relationships || !Array.isArray(parsed.relationships)) return []
 
   const entityTexts = new Set(entities.map((e) => e.text))
   const relationships: ExtractedRelationship[] = []
@@ -95,7 +105,12 @@ function parseResponse(
       entityTexts.has(rel.from) &&
       entityTexts.has(rel.to)
     ) {
-      relationships.push({ edgeType: edgeTypeName, fromText: rel.from, toText: rel.to })
+      relationships.push({
+        edgeType: edgeTypeName,
+        fromText: rel.from,
+        toText: rel.to,
+        explanation: typeof rel.explanation === 'string' ? rel.explanation : '',
+      })
     }
   }
 
