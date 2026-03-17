@@ -35,20 +35,20 @@ export class IngestDocumentWorkflow extends WorkflowEntrypoint<Env, IngestDocume
   async run(event: WorkflowEvent<IngestDocumentParams>, step: WorkflowStep) {
     const { payload } = event
 
-    // Phase 1: Extract content from document and save as markdown to R2
+    // Phase 1: Extract content from document and save as markdown to R2 — 1 step
     const extractResult = await step.do('extract-content', async () => {
       const result = await extractContent(payload.location, payload.mimetype, this.env)
       return { extractedLocation: result.extractedLocation, title: result.title }
     })
     const { extractedLocation, title } = extractResult
 
-    // Phase 2: Count Chinese characters
+    // Phase 2: Count Chinese characters — 1 step
     const charStats = await step.do('count-characters', async () => {
       const content = await loadExtractedContent(extractedLocation, this.env)
       return countChineseCharacters(content)
     })
 
-    // Phase 3: Create the document record in the database
+    // Phase 3: Create the document record in the database — 1 step
     const documentId = await step.do('create-document-record', async () => {
       const result = await this.env.DB.prepare(
         `INSERT INTO document (
@@ -85,13 +85,13 @@ export class IngestDocumentWorkflow extends WorkflowEntrypoint<Env, IngestDocume
       return result.id
     })
 
-    // Phase 4: Generate text chunk indices
+    // Phase 4: Generate text chunk indices — 1 step
     const chunkIndices = await step.do('generate-chunk-indices', async () => {
       const content = await loadExtractedContent(extractedLocation, this.env)
       return generateChunkIndices(content)
     })
 
-    // Phase 5: Persist each text chunk in database
+    // Phase 5: Persist each text chunk in database — n + 1 steps
     const chunkIds = await step.do('persist-text-chunks', async () => {
       const content = await loadExtractedContent(extractedLocation, this.env)
 
@@ -142,7 +142,7 @@ export class IngestDocumentWorkflow extends WorkflowEntrypoint<Env, IngestDocume
       return ids
     })
 
-    // Phase 6: Embed each chunk
+    // Phase 6: Embed each chunk — n steps
     await Promise.allSettled(
       chunkIds.map((chunkId) =>
         step.do(`embed-chunk-${chunkId}`, async () => {
@@ -160,7 +160,7 @@ export class IngestDocumentWorkflow extends WorkflowEntrypoint<Env, IngestDocume
       )
     )
 
-    // Phase 7: Load entity type definitions
+    // Phase 7: Load entity type definitions — 1 step
     const entityTypeContext = await step.do(
       'load-entity-type-definitions',
       async (): Promise<EntityTypeContext> => {
@@ -224,7 +224,7 @@ export class IngestDocumentWorkflow extends WorkflowEntrypoint<Env, IngestDocume
       `[ingest] Starting entity extraction — ${chunkIds.length} chunks, ${entityTypeContext.nodeTypes.length} node types, ${entityTypeContext.edgeTypes.length} edge types`
     )
 
-    // Phase 8: Extract entities + deduplicate + extract relationships + persist — all chunks in parallel
+    // Phase 8: Extract entities, deduplicate, and persist — n(k + 3) steps (k = node types)
     await Promise.allSettled(
       chunkIds.map(async (chunkId) => {
         const chunkContent = await step.do(`load-chunk-content-${chunkId}`, async () => {
@@ -283,12 +283,12 @@ export class IngestDocumentWorkflow extends WorkflowEntrypoint<Env, IngestDocume
       })
     )
 
-    // Phase 8.5: Document-wide coreference resolution
+    // Phase 9: Document-wide coreference resolution — 1 step
     await step.do('coref-resolution', LLM_STEP_RETRIES, async () => {
       await resolveDocumentCoreference(documentId, this.env)
     })
 
-    // Phase 8.7: Sliding window relationship extraction (document-level, after coref)
+    // Phase 10: Sliding window relationship extraction — ⌈n/2⌉ · e + 1 steps (e = edge types)
     if (entityTypeContext.edgeTypes.length > 0) {
       interface WindowRelResult {
         centerIdx: number
@@ -303,7 +303,7 @@ export class IngestDocumentWorkflow extends WorkflowEntrypoint<Env, IngestDocume
       }
 
       const windowCount = centerIndices.length * entityTypeContext.edgeTypes.length
-      console.log(`[ingest] Document ${documentId}: starting Phase 8.7 — ${windowCount} window/edge-type steps`)
+      console.log(`[ingest] Document ${documentId}: starting Phase 10 — ${windowCount} window/edge-type steps`)
 
       const windowResults = await Promise.allSettled(
         centerIndices.flatMap((centerIdx) =>
@@ -541,7 +541,7 @@ export class IngestDocumentWorkflow extends WorkflowEntrypoint<Env, IngestDocume
       })
     }
 
-    // Phase 8.9a: MT baseline translation (draft_number = -1)
+    // Phase 11: MT baseline translation (draft_number = -1) — n steps
     await Promise.allSettled(
       chunkIds.map((chunkId) =>
         step.do(`translate-chunk-mt-baseline-${chunkId}`, LLM_STEP_RETRIES, async () => {
@@ -553,9 +553,9 @@ export class IngestDocumentWorkflow extends WorkflowEntrypoint<Env, IngestDocume
         })
       )
     )
-    console.log(`[ingest] Document ${documentId}: Phase 8.9a complete — ${chunkIds.length} chunks MT baseline translated`)
+    console.log(`[ingest] Document ${documentId}: Phase 11 complete — ${chunkIds.length} chunks MT baseline translated`)
 
-    // Phase 8.9b: LLM+MT context baseline translation (draft_number = 0)
+    // Phase 12: LLM+MT context baseline translation (draft_number = 0) — n steps
     await Promise.allSettled(
       chunkIds.map((chunkId) =>
         step.do(`translate-chunk-llm-mt-baseline-${chunkId}`, LLM_STEP_RETRIES, async () => {
@@ -567,9 +567,9 @@ export class IngestDocumentWorkflow extends WorkflowEntrypoint<Env, IngestDocume
         })
       )
     )
-    console.log(`[ingest] Document ${documentId}: Phase 8.9b complete — ${chunkIds.length} chunks LLM+MT baseline translated`)
+    console.log(`[ingest] Document ${documentId}: Phase 12 complete — ${chunkIds.length} chunks LLM+MT baseline translated`)
 
-    // Phase 9: Initial translation draft (all chunks in parallel)
+    // Phase 13: Initial translation draft — n steps
     await Promise.allSettled(
       chunkIds.map((chunkId) =>
         step.do(`translate-chunk-initial-${chunkId}`, LLM_STEP_RETRIES, async () => {
@@ -581,9 +581,9 @@ export class IngestDocumentWorkflow extends WorkflowEntrypoint<Env, IngestDocume
         })
       )
     )
-    console.log(`[ingest] Document ${documentId}: Phase 9 complete — ${chunkIds.length} chunks translated (initial draft)`)
+    console.log(`[ingest] Document ${documentId}: Phase 13 complete — ${chunkIds.length} chunks translated (initial draft)`)
 
-    // Phase 10: Revised translation draft (all chunks in parallel)
+    // Phase 14: Revised translation draft — n steps
     await Promise.allSettled(
       chunkIds.map((chunkId) =>
         step.do(`translate-chunk-revision-${chunkId}`, LLM_STEP_RETRIES, async () => {
@@ -595,7 +595,7 @@ export class IngestDocumentWorkflow extends WorkflowEntrypoint<Env, IngestDocume
         })
       )
     )
-    console.log(`[ingest] Document ${documentId}: Phase 10 complete — ${chunkIds.length} chunks translated (revision)`)
+    console.log(`[ingest] Document ${documentId}: Phase 14 complete — ${chunkIds.length} chunks translated (revision)`)
 
     return { documentId, chunkCount: chunkIds.length }
   }
