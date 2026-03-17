@@ -1,3 +1,5 @@
+import { extractJsonObject } from './llm-utils'
+
 const MODEL = '@cf/meta/llama-3.3-70b-instruct-fp8-fast' as BaseAiTextGenerationModels
 
 interface ChunkEntity {
@@ -29,7 +31,8 @@ function normalizedEditDistance(a: string, b: string): number {
 
 function parseLLMResponse(result: AiTextGenerationOutput): Record<string, unknown> | null {
   if ('response' in result && typeof result.response === 'string') {
-    return JSON.parse(result.response) as Record<string, unknown>
+    const raw = result.response // read before any exception can leave it undisposed
+    return JSON.parse(extractJsonObject(raw)) as Record<string, unknown>
   }
   if ('response' in result && result.response && typeof result.response === 'object') {
     return result.response as Record<string, unknown>
@@ -101,30 +104,34 @@ export async function resolveDocumentCoreference(documentId: number, env: Env): 
     return
   }
 
-  // Step 2: Candidate filtering — find entities that could be coreferent
+  // Step 2: Candidate filtering — find entities that could be coreferent.
+  // Build an adjacency map using same-type edges only (cross-type merges are impossible).
   const candidateIds = new Set<number>()
+  const adj = new Map<number, Set<number>>()
 
   for (let i = 0; i < entities.length; i++) {
     for (let j = i + 1; j < entities.length; j++) {
       const a = entities[i]
       const b = entities[j]
 
-      // Exact match (different chunks or same chunk different span is fine)
-      if (a.extractedText === b.extractedText) {
-        candidateIds.add(a.id)
-        candidateIds.add(b.id)
-        continue
-      }
-
-      // Fuzzy match: same type, both length >= 3, distance < 0.3
-      if (
+      const exactMatch = a.extractedText === b.extractedText
+      const fuzzyMatch =
+        !exactMatch &&
         a.entityType === b.entityType &&
         a.extractedText.length >= 3 &&
         b.extractedText.length >= 3 &&
         normalizedEditDistance(a.extractedText, b.extractedText) < 0.3
-      ) {
+
+      if (exactMatch || fuzzyMatch) {
         candidateIds.add(a.id)
         candidateIds.add(b.id)
+        if (!adj.has(a.id)) adj.set(a.id, new Set())
+        if (!adj.has(b.id)) adj.set(b.id, new Set())
+        // Only link same-type pairs — cross-type entities won't be merged
+        if (a.entityType === b.entityType) {
+          adj.get(a.id)!.add(b.id)
+          adj.get(b.id)!.add(a.id)
+        }
       }
     }
   }
@@ -135,15 +142,39 @@ export async function resolveDocumentCoreference(documentId: number, env: Env): 
   }
 
   const candidates = entities.filter((e) => candidateIds.has(e.id))
+  const entityById = new Map(candidates.map((e) => [e.id, e]))
+
   console.log(
     `[coreference] Document ${documentId}: ${candidates.length} candidates from ${entities.length} chunk entities`
   )
 
-  // Step 3: LLM grouping call
-  const entityLines = candidates
-    .map((e) => `${e.id} | ${e.entityType} | ${e.extractedText} | ...${e.context}...`)
-    .join('\n')
+  // Step 3: BFS to find connected components — each becomes one LLM batch.
+  // Singletons (no same-type neighbor) are skipped since they can't be merged.
+  const visited = new Set<number>()
+  const batches: ChunkEntity[][] = []
 
+  for (const entity of candidates) {
+    if (visited.has(entity.id)) continue
+    const batch: ChunkEntity[] = []
+    const queue: ChunkEntity[] = [entity]
+    visited.add(entity.id)
+    while (queue.length > 0) {
+      const cur = queue.shift()!
+      batch.push(cur)
+      for (const neighborId of adj.get(cur.id) ?? []) {
+        if (!visited.has(neighborId)) {
+          visited.add(neighborId)
+          const neighbor = entityById.get(neighborId)
+          if (neighbor) queue.push(neighbor)
+        }
+      }
+    }
+    if (batch.length >= 2) batches.push(batch)
+  }
+
+  console.log(`[coreference] Document ${documentId}: ${batches.length} batches from ${candidates.length} candidates`)
+
+  // Step 4: LLM grouping — one call per connected-component batch.
   const systemPrompt = `You are a coreference resolution system for Chinese text.
 Group entities that refer to the same real-world entity.
 The same text string may refer to different entities (e.g. homonymous names) — use context to decide.
@@ -151,34 +182,45 @@ Entities of different types should not be merged.
 Return JSON: { "groups": [[id, id, ...], ...] }
 Only include groups of 2 or more. Omit entities that should remain distinct.`
 
-  const userPrompt = `Document entities (id | type | text | context):
+  const allGroups: number[][] = []
+
+  for (const batch of batches) {
+    const entityLines = batch
+      .map((e) => `${e.id} | ${e.entityType} | ${e.extractedText} | ...${e.context}...`)
+      .join('\n')
+
+    const userPrompt = `Document entities (id | type | text | context):
 ${entityLines}
 
 Group the entity IDs that refer to the same real-world entity.
 Reply with JSON { "groups": [[id, id, ...], ...] }`
 
-  let groups: number[][] = []
-  try {
-    const result = await env.AI.run(MODEL, {
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: userPrompt },
-      ],
-      temperature: 0,
-      response_format: { type: 'json_object' },
-    })
+    try {
+      const result = await env.AI.run(MODEL, {
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: userPrompt },
+        ],
+        temperature: 0,
+        max_tokens: 1024,
+        response_format: { type: 'json_object' },
+      })
 
-    const parsed = parseLLMResponse(result)
-    if (parsed?.groups && Array.isArray(parsed.groups)) {
-      groups = (parsed.groups as unknown[]).filter(
-        (g): g is number[] =>
-          Array.isArray(g) && g.length >= 2 && g.every((id) => typeof id === 'number')
-      )
+      const parsed = parseLLMResponse(result)
+      if (parsed?.groups && Array.isArray(parsed.groups)) {
+        const groups = (parsed.groups as unknown[]).filter(
+          (g): g is number[] =>
+            Array.isArray(g) && g.length >= 2 && g.every((id) => typeof id === 'number')
+        )
+        allGroups.push(...groups)
+      }
+    } catch (err) {
+      console.warn(`[coreference] LLM batch failed for document ${documentId}:`, err)
+      // Non-fatal: continue with remaining batches
     }
-  } catch (err) {
-    console.warn(`[coreference] LLM grouping call failed for document ${documentId}:`, err)
-    return
   }
+
+  const groups = allGroups
 
   if (groups.length === 0) {
     console.log(`[coreference] LLM found no merge groups for document ${documentId}`)
@@ -187,9 +229,7 @@ Reply with JSON { "groups": [[id, id, ...], ...] }`
 
   console.log(`[coreference] LLM confirmed ${groups.length} merge groups for document ${documentId}`)
 
-  // Step 4: Label generation + Step 5: Persist
-  const entityById = new Map(candidates.map((e) => [e.id, e]))
-
+  // Step 5: Label generation + Step 6: Persist
   for (const group of groups) {
     const members = group.map((id) => entityById.get(id)).filter(Boolean) as ChunkEntity[]
     if (members.length < 2) continue
