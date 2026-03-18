@@ -2,6 +2,7 @@
 import { ref, onMounted, onUnmounted, computed, watch, nextTick } from 'vue'
 import { useRoute } from 'vue-router'
 import { marked } from 'marked'
+import { diffWords } from 'diff'
 
 interface Entity {
   id: number
@@ -52,6 +53,14 @@ const translations = ref<Record<number, string>>({})
 const currentDraftIndices = ref<Record<number, number>>({})
 const focusedChunkId = ref<number | null>(null)
 
+interface CompareEntry {
+  draftIndex: number
+  oldHtml: string
+}
+const compareState = ref<Record<number, CompareEntry | null>>({})
+const draftMenuOpen = ref<Record<number, boolean>>({})
+const diffEditorRefs: Record<number, HTMLElement | null> = {}
+
 const documentTitle = computed(() => {
   if (!document.value) return ''
   return document.value.title || document.value.filename
@@ -95,6 +104,7 @@ function initTranslations() {
 }
 
 async function loadDraft(chunk: Chunk, draftIndex: number) {
+  delete compareState.value[chunk.id]
   const draftNumber = chunk.availableTranslationDrafts[draftIndex - 1]
   if (draftNumber === undefined) return
   const res = await fetch(`/api/library/chunk/${chunk.id}/translation?draft=${draftNumber}`)
@@ -102,6 +112,51 @@ async function loadDraft(chunk: Chunk, draftIndex: number) {
   const data = await res.json() as { content: string }
   translations.value[chunk.id] = data.content
   currentDraftIndices.value[chunk.id] = draftIndex
+}
+
+function buildDiffHtml(oldText: string, newText: string): { oldHtml: string; newHtml: string } {
+  const changes = diffWords(oldText, newText)
+  let oldHtml = ''
+  let newHtml = ''
+  for (const change of changes) {
+    const esc = change.value
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+    if (change.removed) {
+      oldHtml += `<span class="diff-removed">${esc}</span>`
+    } else if (change.added) {
+      newHtml += `<span class="diff-added">${esc}</span>`
+    } else {
+      oldHtml += esc
+      newHtml += esc
+    }
+  }
+  return { oldHtml, newHtml }
+}
+
+async function startCompare(chunk: Chunk, draftIndex: number) {
+  const draftNumber = chunk.availableTranslationDrafts[draftIndex - 1]
+  if (draftNumber === undefined) return
+  const res = await fetch(`/api/library/chunk/${chunk.id}/translation?draft=${draftNumber}`)
+  if (!res.ok) return
+  const data = await res.json() as { content: string }
+  const { oldHtml, newHtml } = buildDiffHtml(data.content, translations.value[chunk.id] ?? '')
+  compareState.value[chunk.id] = { draftIndex, oldHtml }
+  draftMenuOpen.value[chunk.id] = false
+  await nextTick()
+  const el = diffEditorRefs[chunk.id]
+  if (el) el.innerHTML = newHtml
+}
+
+function exitCompare(chunkId: number) {
+  const el = diffEditorRefs[chunkId]
+  if (el) translations.value[chunkId] = el.textContent ?? ''
+  delete compareState.value[chunkId]
+}
+
+function onDiffInput(chunkId: number, event: Event) {
+  translations.value[chunkId] = (event.target as HTMLElement).textContent ?? ''
 }
 
 function toggleTranslationMode() {
@@ -553,19 +608,46 @@ onUnmounted(() => {
               v-html="renderChunk(chunk)"
             />
             <div class="translation-chunk-input">
-              <v-textarea
-                v-model="translations[chunk.id]"
-                variant="outlined"
-                hide-details
-                auto-grow
-                rows="3"
-                placeholder="Translation…"
-                @focus="focusedChunkId = chunk.id"
-                @blur="focusedChunkId = null"
-              />
+              <!-- Compare mode: side-by-side diff -->
+              <template v-if="compareState[chunk.id]">
+                <div class="diff-view">
+                  <div class="diff-panel">
+                    <div class="diff-panel-header">Draft {{ compareState[chunk.id]!.draftIndex }}</div>
+                    <div class="diff-content" v-html="compareState[chunk.id]!.oldHtml"></div>
+                  </div>
+                  <div class="diff-panel">
+                    <div class="diff-panel-header">Draft {{ currentDraftIndices[chunk.id] }} (editing)</div>
+                    <div
+                      contenteditable="true"
+                      class="diff-content diff-content--editable"
+                      :ref="(el) => { diffEditorRefs[chunk.id] = el as HTMLElement | null }"
+                      @input="onDiffInput(chunk.id, $event)"
+                    />
+                  </div>
+                </div>
+                <div class="diff-exit-row">
+                  <v-btn size="small" variant="text" density="compact" @click="exitCompare(chunk.id)">Done</v-btn>
+                </div>
+              </template>
+
+              <!-- Normal mode: textarea -->
+              <template v-else>
+                <v-textarea
+                  v-model="translations[chunk.id]"
+                  variant="outlined"
+                  hide-details
+                  auto-grow
+                  rows="3"
+                  placeholder="Translation…"
+                  @focus="focusedChunkId = chunk.id"
+                  @blur="focusedChunkId = null"
+                />
+              </template>
+
+              <!-- Draft selector (always shown) -->
               <div v-if="chunk.availableTranslationDrafts.length > 0" class="translation-draft-label">
                 Draft
-                <v-menu>
+                <v-menu v-model="draftMenuOpen[chunk.id]">
                   <template #activator="{ props }">
                     <span v-bind="props" class="draft-picker-trigger">{{ currentDraftIndices[chunk.id] }}</span>
                   </template>
@@ -573,10 +655,20 @@ onUnmounted(() => {
                     <v-list-item
                       v-for="i in chunk.availableTranslationDrafts.length"
                       :key="i"
-                      :title="`Draft ${i}`"
                       :active="currentDraftIndices[chunk.id] === i"
-                      @click="loadDraft(chunk, i)"
-                    />
+                      @click="loadDraft(chunk, i); draftMenuOpen[chunk.id] = false"
+                    >
+                      <v-list-item-title>Draft {{ i }}</v-list-item-title>
+                      <template #append>
+                        <v-btn
+                          icon="mdi-compare"
+                          size="x-small"
+                          variant="text"
+                          title="Compare"
+                          @click.stop="startCompare(chunk, i)"
+                        />
+                      </template>
+                    </v-list-item>
                   </v-list>
                 </v-menu>
                 of {{ chunk.availableTranslationDrafts.length }}
@@ -817,6 +909,68 @@ onUnmounted(() => {
   cursor: pointer;
   text-decoration: underline dotted;
   text-underline-offset: 2px;
+}
+
+.diff-view {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  border: 1px solid rgba(var(--v-theme-on-surface), 0.12);
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.diff-panel {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.diff-panel + .diff-panel {
+  border-left: 1px solid rgba(var(--v-theme-on-surface), 0.12);
+}
+
+.diff-panel-header {
+  font-size: 0.72rem;
+  font-weight: 500;
+  letter-spacing: 0.03em;
+  padding: 4px 10px;
+  background: rgba(var(--v-theme-on-surface), 0.04);
+  border-bottom: 1px solid rgba(var(--v-theme-on-surface), 0.08);
+  color: rgba(var(--v-theme-on-surface), 0.5);
+}
+
+.diff-content {
+  padding: 10px;
+  font-size: 1rem;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+  min-height: 80px;
+}
+
+.diff-content--editable {
+  outline: none;
+  cursor: text;
+}
+
+.diff-content--editable:focus {
+  background: rgba(var(--v-theme-primary), 0.03);
+}
+
+.diff-content :deep(.diff-removed) {
+  background: rgba(239, 68, 68, 0.15);
+  text-decoration: line-through;
+  color: rgba(var(--v-theme-on-surface), 0.6);
+}
+
+.diff-content :deep(.diff-added) {
+  background: rgba(34, 197, 94, 0.18);
+}
+
+.diff-exit-row {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 2px;
 }
 
 .translation-chunk-input :deep(.v-textarea textarea) {
