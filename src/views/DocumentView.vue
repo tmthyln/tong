@@ -24,6 +24,8 @@ interface Chunk {
   uniqueCharCount: number
   entities: Entity[]
   translation: string | null
+  translationDraftNumber: number | null
+  availableTranslationDrafts: number[]
 }
 
 interface Document {
@@ -47,6 +49,7 @@ const loading = ref(false)
 const error = ref<string | null>(null)
 const translationMode = ref(false)
 const translations = ref<Record<number, string>>({})
+const currentDraftIndices = ref<Record<number, number>>({})
 const focusedChunkId = ref<number | null>(null)
 
 const documentTitle = computed(() => {
@@ -86,8 +89,19 @@ function initTranslations() {
   for (const chunk of document.value.chunks) {
     if (!(chunk.id in translations.value)) {
       translations.value[chunk.id] = chunk.translation ?? ''
+      currentDraftIndices.value[chunk.id] = chunk.availableTranslationDrafts.length || 1
     }
   }
+}
+
+async function loadDraft(chunk: Chunk, draftIndex: number) {
+  const draftNumber = chunk.availableTranslationDrafts[draftIndex - 1]
+  if (draftNumber === undefined) return
+  const res = await fetch(`/api/library/chunk/${chunk.id}/translation?draft=${draftNumber}`)
+  if (!res.ok) return
+  const data = await res.json() as { content: string }
+  translations.value[chunk.id] = data.content
+  currentDraftIndices.value[chunk.id] = draftIndex
 }
 
 function toggleTranslationMode() {
@@ -549,6 +563,24 @@ onUnmounted(() => {
                 @focus="focusedChunkId = chunk.id"
                 @blur="focusedChunkId = null"
               />
+              <div v-if="chunk.availableTranslationDrafts.length > 0" class="translation-draft-label">
+                Draft
+                <v-menu>
+                  <template #activator="{ props }">
+                    <span v-bind="props" class="draft-picker-trigger">{{ currentDraftIndices[chunk.id] }}</span>
+                  </template>
+                  <v-list density="compact" nav>
+                    <v-list-item
+                      v-for="i in chunk.availableTranslationDrafts.length"
+                      :key="i"
+                      :title="`Draft ${i}`"
+                      :active="currentDraftIndices[chunk.id] === i"
+                      @click="loadDraft(chunk, i)"
+                    />
+                  </v-list>
+                </v-menu>
+                of {{ chunk.availableTranslationDrafts.length }}
+              </div>
             </div>
           </template>
         </div>
@@ -770,7 +802,21 @@ onUnmounted(() => {
 .translation-chunk-input {
   padding: 8px 0;
   display: flex;
-  align-items: flex-start;
+  flex-direction: column;
+  align-items: stretch;
+}
+
+.translation-draft-label {
+  margin-top: 4px;
+  font-size: 0.85rem;
+  color: rgba(var(--v-theme-on-surface), 0.5);
+  padding-left: 2px;
+}
+
+.draft-picker-trigger {
+  cursor: pointer;
+  text-decoration: underline dotted;
+  text-underline-offset: 2px;
 }
 
 .translation-chunk-input :deep(.v-textarea textarea) {

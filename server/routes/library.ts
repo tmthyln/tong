@@ -434,21 +434,36 @@ libraryRoutes.get('/document/:id', async (c) => {
     toType: r.to_type,
   }))
 
-  // Fetch latest translation draft for each chunk
-  const translationsByChunkId: Record<number, string> = {}
+  // Fetch latest translation draft and all available draft numbers for each chunk
+  const translationsByChunkId: Record<number, { content: string; draftNumber: number }> = {}
+  const availableDraftsByChunkId: Record<number, number[]> = {}
   if (chunkIds.length > 0) {
-    const translationsResult = await c.env.DB.prepare(
-      `SELECT text_chunk_id, content
-       FROM translation_chunk
-       WHERE text_chunk_id IN (SELECT id FROM text_chunk WHERE source_document_id = ?)
-       GROUP BY text_chunk_id
-       HAVING draft_number = MAX(draft_number)`
-    )
-      .bind(id)
-      .all<{ text_chunk_id: number; content: string }>()
+    const [latestResult, allDraftsResult] = await Promise.all([
+      c.env.DB.prepare(
+        `SELECT text_chunk_id, content, draft_number
+         FROM translation_chunk
+         WHERE text_chunk_id IN (SELECT id FROM text_chunk WHERE source_document_id = ?)
+         GROUP BY text_chunk_id
+         HAVING draft_number = MAX(draft_number)`
+      )
+        .bind(id)
+        .all<{ text_chunk_id: number; content: string; draft_number: number }>(),
+      c.env.DB.prepare(
+        `SELECT text_chunk_id, draft_number
+         FROM translation_chunk
+         WHERE text_chunk_id IN (SELECT id FROM text_chunk WHERE source_document_id = ?)
+         ORDER BY draft_number`
+      )
+        .bind(id)
+        .all<{ text_chunk_id: number; draft_number: number }>(),
+    ])
 
-    for (const row of translationsResult.results) {
-      translationsByChunkId[row.text_chunk_id] = row.content
+    for (const row of latestResult.results) {
+      translationsByChunkId[row.text_chunk_id] = { content: row.content, draftNumber: row.draft_number }
+    }
+    for (const row of allDraftsResult.results) {
+      if (!availableDraftsByChunkId[row.text_chunk_id]) availableDraftsByChunkId[row.text_chunk_id] = []
+      availableDraftsByChunkId[row.text_chunk_id].push(row.draft_number)
     }
   }
 
@@ -462,7 +477,9 @@ libraryRoutes.get('/document/:id', async (c) => {
     charCount: chunk.char_count,
     uniqueCharCount: chunk.unique_char_count,
     entities: entitiesByChunkId[chunk.id] || [],
-    translation: translationsByChunkId[chunk.id] ?? null,
+    translation: translationsByChunkId[chunk.id]?.content ?? null,
+    translationDraftNumber: translationsByChunkId[chunk.id]?.draftNumber ?? null,
+    availableTranslationDrafts: availableDraftsByChunkId[chunk.id] ?? [],
   }))
 
   return c.json({
@@ -482,6 +499,23 @@ libraryRoutes.get('/document/:id', async (c) => {
     chunkRelationships,
     relationships,
   })
+})
+
+libraryRoutes.get('/chunk/:chunkId/translation', async (c) => {
+  const chunkId = parseInt(c.req.param('chunkId'), 10)
+  const draftNumber = parseInt(c.req.query('draft') ?? '', 10)
+  if (isNaN(chunkId) || isNaN(draftNumber)) {
+    return c.json({ error: 'Invalid parameters' }, 400)
+  }
+
+  const row = await c.env.DB.prepare(
+    'SELECT content FROM translation_chunk WHERE text_chunk_id = ? AND draft_number = ? LIMIT 1'
+  )
+    .bind(chunkId, draftNumber)
+    .first<{ content: string }>()
+
+  if (!row) return c.json({ error: 'Not found' }, 404)
+  return c.json({ content: row.content })
 })
 
 libraryRoutes.get('/document/:id/original', async (c) => {
