@@ -4,6 +4,7 @@ import { useRoute } from 'vue-router'
 import { marked } from 'marked'
 import { diffWords } from 'diff'
 import DictHeadword from '../components/DictHeadword.vue'
+import { useUser } from '../composables/useUser'
 
 interface Entity {
   id: number
@@ -49,6 +50,7 @@ interface Document {
 }
 
 const route = useRoute()
+const { userId } = useUser()
 const document = ref<Document | null>(null)
 const loading = ref(false)
 const error = ref<string | null>(null)
@@ -69,6 +71,14 @@ const documentTitle = computed(() => {
   if (!document.value) return ''
   return document.value.title || document.value.filename
 })
+
+function translatorStatus(chunk: Chunk): 'none' | 'ai' | 'self' | 'other' {
+  const t = chunk.translationTranslator
+  if (!t) return 'none'
+  if (t.startsWith('ai:') || t.startsWith('mt:')) return 'ai'
+  if (t === userId.value) return 'self'
+  return 'other'
+}
 
 const entityChips = computed<{ text: string; count: number; color: 'blue' | 'red' }[]>(() => {
   const doc = document.value
@@ -663,7 +673,12 @@ onUnmounted(() => {
           <template v-for="chunk in document.chunks" :key="chunk.id">
             <div
               class="document-content translation-chunk-text"
-              :class="{ 'translation-chunk-text--active': focusedChunkId === chunk.id }"
+              :class="{
+                'translation-chunk-text--active': focusedChunkId === chunk.id,
+                'translation-chunk-text--ai':    translationMode && translatorStatus(chunk) === 'ai',
+                'translation-chunk-text--self':  translationMode && translatorStatus(chunk) === 'self',
+                'translation-chunk-text--other': translationMode && translatorStatus(chunk) === 'other',
+              }"
               :data-chunk-id="chunk.id"
               v-html="renderChunk(chunk)"
             />
@@ -950,7 +965,18 @@ onUnmounted(() => {
 }
 
 .translation-chunk-text--active::before {
-  width: 4px;
+  width: 6px;
+}
+
+.translation-chunk-text--ai::before {
+  background: rgb(var(--v-theme-warning));
+}
+
+.translation-chunk-text--self::before {
+  background: rgb(var(--v-theme-success));
+}
+
+.translation-chunk-text--other::before {
   background: rgb(var(--v-theme-primary));
 }
 
