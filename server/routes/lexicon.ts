@@ -1,5 +1,6 @@
 import { Hono } from 'hono'
-import {Lexicon} from "../lexicon";
+import { Lexicon } from '../lexicon'
+import { getUserId, userType } from '../lib/auth'
 
 export interface Env {
   LEXICON: DurableObjectNamespace<Lexicon>
@@ -7,20 +8,20 @@ export interface Env {
 
 const lexiconRoutes = new Hono<{ Bindings: Env }>()
 
-function getLexicon(env: Env) {
-  const id = env.LEXICON.idFromName('default')
+function getLexicon(c: Parameters<typeof getUserId>[0], env: Env) {
+  const id = env.LEXICON.idFromName(getUserId(c))
   return env.LEXICON.get(id)
 }
 
 lexiconRoutes.get('/', async (c) => {
-  const lexicon = getLexicon(c.env)
+  const lexicon = getLexicon(c, c.env)
   const entries = await lexicon.getAll()
   return c.json({ entries })
 })
 
 lexiconRoutes.get('/:term', async (c) => {
   const term = c.req.param('term')
-  const lexicon = getLexicon(c.env)
+  const lexicon = getLexicon(c, c.env)
   const entry = await lexicon.getTerm(term)
 
   if (!entry) {
@@ -30,10 +31,14 @@ lexiconRoutes.get('/:term', async (c) => {
 })
 
 lexiconRoutes.post('/:term', async (c) => {
-  const term = c.req.param('term')
-  const lexicon = getLexicon(c.env)
+  if (userType(getUserId(c)) === 'public') {
+    return c.json({ error: 'Unauthorized' }, 401)
+  }
 
-  const body = await c.req.json<{ tags?: string[] }>().catch(() => ({tags: []}))
+  const term = c.req.param('term')
+  const lexicon = getLexicon(c, c.env)
+
+  const body = await c.req.json<{ tags?: string[] }>().catch(() => ({ tags: [] }))
   const result = await lexicon.addOrRelearn(term, body.tags)
 
   return c.json(
@@ -47,8 +52,12 @@ lexiconRoutes.post('/:term', async (c) => {
 })
 
 lexiconRoutes.post('/:term/fail', async (c) => {
+  if (userType(getUserId(c)) === 'public') {
+    return c.json({ error: 'Unauthorized' }, 401)
+  }
+
   const term = c.req.param('term')
-  const lexicon = getLexicon(c.env)
+  const lexicon = getLexicon(c, c.env)
   const entry = await lexicon.markFailed(term)
 
   if (!entry) {
@@ -58,8 +67,12 @@ lexiconRoutes.post('/:term/fail', async (c) => {
 })
 
 lexiconRoutes.put('/:term/tags', async (c) => {
+  if (userType(getUserId(c)) === 'public') {
+    return c.json({ error: 'Unauthorized' }, 401)
+  }
+
   const term = c.req.param('term')
-  const lexicon = getLexicon(c.env)
+  const lexicon = getLexicon(c, c.env)
 
   const body = await c.req.json<{ tags: string[] }>()
   const entry = await lexicon.updateTags(term, body.tags)

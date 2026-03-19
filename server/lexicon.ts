@@ -99,6 +99,18 @@ export class Lexicon extends DurableObject<Env> {
     return await this.getTerm(term)
   }
 
+  async setAlarm(): Promise<void> {
+    await this.ctx.storage.setAlarm(Date.now() + 24 * 60 * 60 * 1000)
+  }
+
+  async destroy(): Promise<void> {
+    await this.ctx.storage.deleteAll()
+  }
+
+  async alarm(): Promise<void> {
+    await this.destroy()
+  }
+
   private rowToEntry(row: LexiconRow): LexiconEntry {
     return {
       term: row.term,

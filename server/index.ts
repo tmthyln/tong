@@ -4,6 +4,7 @@ import libraryRoutes from './routes/library'
 import graphTypeRoutes from './routes/graph-types'
 import dictionaryRoutes from './routes/dictionary'
 import knowledgeRoutes from './routes/knowledge'
+import authRoutes from './routes/auth'
 
 export { IngestDocumentWorkflow } from './workflows/ingest-document'
 export { RefreshCedictWorkflow } from './workflows/refresh-cedict'
@@ -11,6 +12,7 @@ export { Lexicon } from './lexicon'
 
 const app = new Hono<{ Bindings: Env }>()
 
+app.route('/api/auth', authRoutes)
 app.route('/api/lexicon', lexiconRoutes)
 app.route('/api/library', libraryRoutes)
 app.route('/api/graph-types', graphTypeRoutes)
