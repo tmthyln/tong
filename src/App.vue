@@ -3,6 +3,7 @@ import { RouterView } from 'vue-router'
 import { ref, computed, onMounted } from 'vue'
 import { useTheme } from 'vuetify'
 import { useUser } from './composables/useUser'
+import { usePreferences } from './composables/usePreferences'
 
 const theme = useTheme()
 const drawer = ref(true)
@@ -16,11 +17,13 @@ function toggleTheme() {
 }
 
 const { userType, displayName, expiresIn, fetchUser, login, logout, createTestAccount } = useUser()
+const { fetchPreferences } = usePreferences()
 
 const selectedAccount = ref<string>('alice')
 
 onMounted(() => {
   fetchUser()
+  fetchPreferences()
 })
 
 const navItems = [

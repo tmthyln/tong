@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, computed } from 'vue'
+import { usePreferences } from '../composables/usePreferences'
 
 const props = defineProps<{
   traditional: string
@@ -12,19 +13,18 @@ defineSlots<{
   default(props: { primary: string; secondary: string | null; swap: () => void }): unknown
 }>()
 
-function detectBaseScript(): 'traditional' | 'simplified' {
-  if (props.queryText && props.queryText === props.simplified && props.queryText !== props.traditional) {
-    return 'simplified'
-  }
-  return 'traditional'
-}
+const { script: preferredScript } = usePreferences()
 
 const flipped = ref(false)
-const baseScript = detectBaseScript()
+
+const baseScript = computed<'traditional' | 'simplified'>(() => {
+  if (props.queryText && props.queryText === props.simplified && props.queryText !== props.traditional) return 'simplified'
+  return preferredScript.value
+})
 
 const primaryScript = computed<'traditional' | 'simplified'>(() => {
-  if (!flipped.value) return baseScript
-  return baseScript === 'traditional' ? 'simplified' : 'traditional'
+  if (!flipped.value) return baseScript.value
+  return baseScript.value === 'traditional' ? 'simplified' : 'traditional'
 })
 
 const primary = computed(() =>

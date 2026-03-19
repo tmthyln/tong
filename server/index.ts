@@ -5,6 +5,7 @@ import graphTypeRoutes from './routes/graph-types'
 import dictionaryRoutes from './routes/dictionary'
 import knowledgeRoutes from './routes/knowledge'
 import authRoutes from './routes/auth'
+import preferencesRoutes from './routes/preferences'
 
 export { IngestDocumentWorkflow } from './workflows/ingest-document'
 export { RefreshCedictWorkflow } from './workflows/refresh-cedict'
@@ -18,5 +19,6 @@ app.route('/api/library', libraryRoutes)
 app.route('/api/graph-types', graphTypeRoutes)
 app.route('/api/dictionary', dictionaryRoutes)
 app.route('/api/knowledge', knowledgeRoutes)
+app.route('/api/preferences', preferencesRoutes)
 
 export default app

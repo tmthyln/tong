@@ -99,6 +99,17 @@ export class Lexicon extends DurableObject<Env> {
     return await this.getTerm(term)
   }
 
+  async getPreferences(): Promise<{ script: string; pronunciation: string }> {
+    return (await this.ctx.storage.get<{ script: string; pronunciation: string }>('preferences')) ?? { script: 'traditional', pronunciation: 'pinyin' }
+  }
+
+  async setPreferences(prefs: { script?: string; pronunciation?: string }): Promise<{ script: string; pronunciation: string }> {
+    const current = await this.getPreferences()
+    const updated = { ...current, ...prefs }
+    await this.ctx.storage.put('preferences', updated)
+    return updated
+  }
+
   async setAlarm(): Promise<void> {
     await this.ctx.storage.setAlarm(Date.now() + 24 * 60 * 60 * 1000)
   }
