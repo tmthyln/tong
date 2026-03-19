@@ -607,20 +607,14 @@ onUnmounted(() => {
         </v-col>
       </v-row>
 
-      <!-- Normal reading view -->
-      <v-card v-if="!translationMode">
-        <v-card-text class="document-content" @mouseup="onContentMouseUp" @dblclick="onContentDblClick" @click="onContentClick">
-          <div
-            v-for="chunk in document.chunks"
-            :key="chunk.id"
-            :data-chunk-id="chunk.id"
-            v-html="renderChunk(chunk)"
-          />
-        </v-card-text>
-      </v-card>
-
-      <!-- Translation view: card behind original text only, textareas float on right -->
-      <div v-else class="translation-layout" @mouseup="onContentMouseUp" @dblclick="onContentDblClick" @click="onContentClick">
+      <!-- Reading / Translation view (unified) -->
+      <div
+        class="translation-layout"
+        :class="{ 'translation-layout--reading': !translationMode }"
+        @mouseup="onContentMouseUp"
+        @dblclick="onContentDblClick"
+        @click="onContentClick"
+      >
         <v-card class="translation-text-card" />
         <div class="translation-grid">
           <template v-for="chunk in document.chunks" :key="chunk.id">
@@ -630,7 +624,7 @@ onUnmounted(() => {
               :data-chunk-id="chunk.id"
               v-html="renderChunk(chunk)"
             />
-            <div class="translation-chunk-input">
+            <div v-if="translationMode" class="translation-chunk-input">
               <!-- Compare mode: side-by-side diff -->
               <template v-if="compareState[chunk.id]">
                 <div class="diff-view">
@@ -877,12 +871,20 @@ onUnmounted(() => {
   z-index: 0;
 }
 
+.translation-layout--reading .translation-text-card {
+  width: 100%;
+}
+
 .translation-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
   column-gap: 16px;
   position: relative;
   z-index: 1;
+}
+
+.translation-layout--reading .translation-grid {
+  grid-template-columns: 1fr;
 }
 
 .translation-chunk-text {
@@ -911,6 +913,14 @@ onUnmounted(() => {
 }
 
 .translation-grid > :nth-last-child(2) {
+  padding-bottom: 16px;
+}
+
+.translation-layout--reading .translation-grid > :nth-last-child(2) {
+  padding-bottom: 0;
+}
+
+.translation-layout--reading .translation-grid > :last-child {
   padding-bottom: 16px;
 }
 
