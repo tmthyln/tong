@@ -435,19 +435,19 @@ libraryRoutes.get('/document/:id', async (c) => {
   }))
 
   // Fetch latest translation draft and all available draft numbers for each chunk
-  const translationsByChunkId: Record<number, { content: string; draftNumber: number }> = {}
+  const translationsByChunkId: Record<number, { content: string; draftNumber: number; translator: string; dateLastModified: string | null }> = {}
   const availableDraftsByChunkId: Record<number, number[]> = {}
   if (chunkIds.length > 0) {
     const [latestResult, allDraftsResult] = await Promise.all([
       c.env.DB.prepare(
-        `SELECT text_chunk_id, content, draft_number
+        `SELECT text_chunk_id, content, draft_number, translator, date_last_modified
          FROM translation_chunk
          WHERE text_chunk_id IN (SELECT id FROM text_chunk WHERE source_document_id = ?)
          GROUP BY text_chunk_id
          HAVING draft_number = MAX(draft_number)`
       )
         .bind(id)
-        .all<{ text_chunk_id: number; content: string; draft_number: number }>(),
+        .all<{ text_chunk_id: number; content: string; draft_number: number; translator: string; date_last_modified: string | null }>(),
       c.env.DB.prepare(
         `SELECT text_chunk_id, draft_number
          FROM translation_chunk
@@ -459,7 +459,7 @@ libraryRoutes.get('/document/:id', async (c) => {
     ])
 
     for (const row of latestResult.results) {
-      translationsByChunkId[row.text_chunk_id] = { content: row.content, draftNumber: row.draft_number }
+      translationsByChunkId[row.text_chunk_id] = { content: row.content, draftNumber: row.draft_number, translator: row.translator, dateLastModified: row.date_last_modified }
     }
     for (const row of allDraftsResult.results) {
       if (!availableDraftsByChunkId[row.text_chunk_id]) availableDraftsByChunkId[row.text_chunk_id] = []
@@ -479,6 +479,8 @@ libraryRoutes.get('/document/:id', async (c) => {
     entities: entitiesByChunkId[chunk.id] || [],
     translation: translationsByChunkId[chunk.id]?.content ?? null,
     translationDraftNumber: translationsByChunkId[chunk.id]?.draftNumber ?? null,
+    translationTranslator: translationsByChunkId[chunk.id]?.translator ?? null,
+    translationDateLastModified: translationsByChunkId[chunk.id]?.dateLastModified ?? null,
     availableTranslationDrafts: availableDraftsByChunkId[chunk.id] ?? [],
   }))
 

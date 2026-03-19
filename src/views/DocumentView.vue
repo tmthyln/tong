@@ -27,6 +27,8 @@ interface Chunk {
   entities: Entity[]
   translation: string | null
   translationDraftNumber: number | null
+  translationTranslator: string | null
+  translationDateLastModified: string | null
   availableTranslationDrafts: number[]
 }
 
@@ -702,34 +704,39 @@ onUnmounted(() => {
                 />
               </template>
 
-              <!-- Draft selector (always shown) -->
-              <div v-if="chunk.availableTranslationDrafts.length > 0" class="translation-draft-label">
-                Draft
-                <v-menu v-model="draftMenuOpen[chunk.id]">
-                  <template #activator="{ props }">
-                    <span v-bind="props" class="draft-picker-trigger">{{ currentDraftIndices[chunk.id] }}</span>
-                  </template>
-                  <v-list density="compact" nav>
-                    <v-list-item
-                      v-for="i in chunk.availableTranslationDrafts.length"
-                      :key="i"
-                      :active="currentDraftIndices[chunk.id] === i"
-                      @click="loadDraft(chunk, i); draftMenuOpen[chunk.id] = false"
-                    >
-                      <v-list-item-title>Draft {{ i }}</v-list-item-title>
-                      <template #append>
-                        <v-btn
-                          icon="mdi-compare"
-                          size="x-small"
-                          variant="text"
-                          title="Compare"
-                          @click.stop="startCompare(chunk, i)"
-                        />
-                      </template>
-                    </v-list-item>
-                  </v-list>
-                </v-menu>
-                of {{ chunk.availableTranslationDrafts.length }}
+              <!-- Below-box meta row -->
+              <div v-if="chunk.availableTranslationDrafts.length > 0 || chunk.translationTranslator" class="translation-meta-row">
+                <span v-if="chunk.translationTranslator" class="translation-draft-label">
+                  {{ chunk.translationTranslator }}<template v-if="chunk.translationDateLastModified"> · {{ new Date(chunk.translationDateLastModified).toLocaleDateString() }}</template>
+                </span>
+                <div v-if="chunk.availableTranslationDrafts.length > 0" class="translation-draft-label">
+                  Draft
+                  <v-menu v-model="draftMenuOpen[chunk.id]">
+                    <template #activator="{ props }">
+                      <span v-bind="props" class="draft-picker-trigger">{{ currentDraftIndices[chunk.id] }}</span>
+                    </template>
+                    <v-list density="compact" nav>
+                      <v-list-item
+                        v-for="i in chunk.availableTranslationDrafts.length"
+                        :key="i"
+                        :active="currentDraftIndices[chunk.id] === i"
+                        @click="loadDraft(chunk, i); draftMenuOpen[chunk.id] = false"
+                      >
+                        <v-list-item-title>Draft {{ i }}</v-list-item-title>
+                        <template #append>
+                          <v-btn
+                            icon="mdi-compare"
+                            size="x-small"
+                            variant="text"
+                            title="Compare"
+                            @click.stop="startCompare(chunk, i)"
+                          />
+                        </template>
+                      </v-list-item>
+                    </v-list>
+                  </v-menu>
+                  of {{ chunk.availableTranslationDrafts.length }}
+                </div>
               </div>
             </div>
           </template>
@@ -970,8 +977,14 @@ onUnmounted(() => {
   align-items: stretch;
 }
 
-.translation-draft-label {
+.translation-meta-row {
   margin-top: 4px;
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+}
+
+.translation-draft-label {
   font-size: 0.85rem;
   color: rgba(var(--v-theme-on-surface), 0.5);
   padding-left: 2px;
