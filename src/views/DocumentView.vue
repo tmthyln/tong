@@ -426,12 +426,35 @@ function onContentMouseUp() {
 
 function onDocumentMouseDown(e: MouseEvent) {
   if (toolbarRef.value?.contains(e.target as Node)) return
+  if ((e.target as Element).closest?.('.entity-underline')) return  // onContentClick handles this
   toolbar.value.show = false
-  if (!(e.target as Element).closest?.('.entity-underline')) {
-    activeEntityId.value   = null
-    activeEntityText.value = null
-    activeParentId.value   = null
-    applyEntityHighlights()
+  activeEntityId.value   = null
+  activeEntityText.value = null
+  activeParentId.value   = null
+  applyEntityHighlights()
+}
+
+function onContentClick(e: MouseEvent) {
+  const target = (e.target as Element).closest('.entity-underline')
+  if (!target) return
+  const entityId = Number((target as HTMLElement).dataset.entityId) || null
+  activeEntityId.value   = entityId
+  activeEntityText.value = target.textContent?.trim() ?? null
+  activeParentId.value   = entityId != null ? (entityById.value.get(entityId)?.parentId ?? null) : null
+  applyEntityHighlights()
+  const chunkEl = target.closest('[data-chunk-id]')
+  const chunkId = chunkEl ? Number(chunkEl.getAttribute('data-chunk-id')) : null
+  const rect = target.getBoundingClientRect()
+  toolbarDragged.value = false
+  toolbar.value = {
+    show: true,
+    x: rect.left + rect.width / 2,
+    y: rect.top,
+    text: activeEntityText.value ?? '',
+    mode: 'actions', results: [], loading: false, error: null,
+    chunkId, explanation: null, explainLoading: false,
+    disambiguateLoading: false, disambiguatedEntryId: null,
+    entitySummaryLoading: false, entitySummary: null,
   }
 }
 
@@ -585,8 +608,8 @@ onUnmounted(() => {
       </v-row>
 
       <!-- Normal reading view -->
-      <v-card v-if="!translationMode" @mouseup="onContentMouseUp" @dblclick="onContentDblClick">
-        <v-card-text class="document-content">
+      <v-card v-if="!translationMode">
+        <v-card-text class="document-content" @mouseup="onContentMouseUp" @dblclick="onContentDblClick" @click="onContentClick">
           <div
             v-for="chunk in document.chunks"
             :key="chunk.id"
@@ -597,7 +620,7 @@ onUnmounted(() => {
       </v-card>
 
       <!-- Translation view: card behind original text only, textareas float on right -->
-      <div v-else class="translation-layout" @mouseup="onContentMouseUp" @dblclick="onContentDblClick">
+      <div v-else class="translation-layout" @mouseup="onContentMouseUp" @dblclick="onContentDblClick" @click="onContentClick">
         <v-card class="translation-text-card" />
         <div class="translation-grid">
           <template v-for="chunk in document.chunks" :key="chunk.id">
@@ -1009,7 +1032,7 @@ onUnmounted(() => {
 }
 
 .document-content :deep(.entity-underline) {
-  cursor: help;
+  cursor: pointer;
   text-decoration: underline;
   text-decoration-style: dotted;
   text-underline-offset: 5px;
