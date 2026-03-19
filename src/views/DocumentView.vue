@@ -59,6 +59,8 @@ const translationMode = ref(false)
 const translations = ref<Record<number, string>>({})
 const currentDraftIndices = ref<Record<number, number>>({})
 const focusedChunkId = ref<number | null>(null)
+const saveTimers = ref<Record<number, ReturnType<typeof setTimeout>>>({})
+const saveStatus = ref<Record<number, 'saving' | 'saved' | 'error'>>({})
 
 interface CompareEntry {
   draftIndex: number
@@ -165,7 +167,55 @@ function initTranslations() {
   }
 }
 
+async function saveTranslation(chunkId: number) {
+  saveStatus.value[chunkId] = 'saving'
+  try {
+    const res = await fetch(`/api/library/chunk/${chunkId}/translation`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content: translations.value[chunkId] }),
+    })
+    if (res.status === 401) {
+      delete saveStatus.value[chunkId]
+      return
+    }
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    const data = await res.json() as { draftNumber: number; translator: string; dateLastModified: string; created: boolean }
+
+    const chunk = document.value?.chunks.find(c => c.id === chunkId)
+    if (chunk) {
+      chunk.translationTranslator = data.translator
+      chunk.translationDateLastModified = data.dateLastModified
+      if (data.created) {
+        chunk.availableTranslationDrafts.push(data.draftNumber)
+        currentDraftIndices.value[chunkId] = chunk.availableTranslationDrafts.length
+      }
+    }
+
+    saveStatus.value[chunkId] = 'saved'
+    setTimeout(() => {
+      if (saveStatus.value[chunkId] === 'saved') delete saveStatus.value[chunkId]
+    }, 2000)
+  } catch {
+    saveStatus.value[chunkId] = 'error'
+  }
+}
+
+function scheduleSave(chunkId: number) {
+  if (compareState.value[chunkId]) return
+  if (saveTimers.value[chunkId]) clearTimeout(saveTimers.value[chunkId])
+  delete saveStatus.value[chunkId]
+  saveTimers.value[chunkId] = setTimeout(() => {
+    delete saveTimers.value[chunkId]
+    saveTranslation(chunkId)
+  }, 5000)
+}
+
 async function loadDraft(chunk: Chunk, draftIndex: number) {
+  if (saveTimers.value[chunk.id]) {
+    clearTimeout(saveTimers.value[chunk.id])
+    delete saveTimers.value[chunk.id]
+  }
   delete compareState.value[chunk.id]
   const draftNumber = chunk.availableTranslationDrafts[draftIndex - 1]
   if (draftNumber === undefined) return
@@ -219,6 +269,7 @@ function exitCompare(chunkId: number) {
 
 function onDiffInput(chunkId: number, event: Event) {
   translations.value[chunkId] = (event.target as HTMLElement).textContent ?? ''
+  scheduleSave(chunkId)
 }
 
 function toggleTranslationMode() {
@@ -663,6 +714,7 @@ onUnmounted(() => {
   window.document.removeEventListener('mousedown', onDocumentMouseDown)
   window.removeEventListener('pointermove', onDragMove)
   window.removeEventListener('pointerup', onDragEnd)
+  for (const timer of Object.values(saveTimers.value)) clearTimeout(timer)
 })
 </script>
 
@@ -759,14 +811,18 @@ onUnmounted(() => {
                   placeholder="Translation…"
                   @focus="focusedChunkId = chunk.id"
                   @blur="focusedChunkId = null"
+                  @input="scheduleSave(chunk.id)"
                 />
               </template>
 
               <!-- Below-box meta row -->
-              <div v-if="chunk.availableTranslationDrafts.length > 0 || chunk.translationTranslator" class="translation-meta-row">
+              <div v-if="chunk.availableTranslationDrafts.length > 0 || chunk.translationTranslator || saveStatus[chunk.id]" class="translation-meta-row">
                 <span v-if="chunk.translationTranslator" class="translation-draft-label">
                   {{ chunk.translationTranslator }}<template v-if="chunk.translationDateLastModified"> · {{ new Date(chunk.translationDateLastModified).toLocaleDateString() }}</template>
                 </span>
+                <span v-if="saveStatus[chunk.id] === 'saving'" class="translation-save-status">Saving…</span>
+                <span v-else-if="saveStatus[chunk.id] === 'saved'" class="translation-save-status text-success">Saved</span>
+                <span v-else-if="saveStatus[chunk.id] === 'error'" class="translation-save-status text-error">Error</span>
                 <div v-if="chunk.availableTranslationDrafts.length > 0" class="translation-draft-label">
                   Draft
                   <v-menu v-model="draftMenuOpen[chunk.id]">
@@ -1102,6 +1158,11 @@ onUnmounted(() => {
 .translation-draft-label {
   font-size: 0.85rem;
   color: rgba(var(--v-theme-on-surface), 0.5);
+  padding-left: 2px;
+}
+
+.translation-save-status {
+  font-size: 0.85rem;
   padding-left: 2px;
 }
 

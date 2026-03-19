@@ -2,6 +2,7 @@ import { Hono } from 'hono'
 import { storeUploadedFile } from '../lib/documents'
 import { loadExtractedContent } from '../lib/extract-content'
 import { removeOverlaps } from '../lib/entity-extraction'
+import { getUserId, userType } from '../lib/auth'
 
 const libraryRoutes = new Hono<{ Bindings: Env }>()
 
@@ -525,6 +526,56 @@ libraryRoutes.get('/chunk/:chunkId/translation', async (c) => {
 
   if (!row) return c.json({ error: 'Not found' }, 404)
   return c.json({ content: row.content })
+})
+
+libraryRoutes.put('/chunk/:chunkId/translation', async (c) => {
+  const userId = getUserId(c)
+  if (userType(userId) === 'public') {
+    return c.json({ error: 'Unauthorized' }, 401)
+  }
+
+  const chunkId = parseInt(c.req.param('chunkId'), 10)
+  if (isNaN(chunkId)) {
+    return c.json({ error: 'Invalid chunk ID' }, 400)
+  }
+
+  const body = await c.req.json<{ content: string }>()
+  if (typeof body.content !== 'string') {
+    return c.json({ error: 'content is required' }, 400)
+  }
+
+  const now = new Date().toISOString()
+
+  const latest = await c.env.DB.prepare(
+    'SELECT draft_number, translator FROM translation_chunk WHERE text_chunk_id = ? ORDER BY draft_number DESC LIMIT 1'
+  )
+    .bind(chunkId)
+    .first<{ draft_number: number; translator: string }>()
+
+  let draftNumber: number
+  let created: boolean
+
+  if (!latest || latest.translator.startsWith('ai:') || latest.translator.startsWith('mt:')) {
+    draftNumber = latest ? latest.draft_number + 1 : 1
+    await c.env.DB.prepare(
+      `INSERT INTO translation_chunk (text_chunk_id, draft_number, content, translator, date_created, date_last_modified)
+       VALUES (?, ?, ?, ?, ?, ?)`
+    )
+      .bind(chunkId, draftNumber, body.content, userId, now, now)
+      .run()
+    created = true
+  } else {
+    draftNumber = latest.draft_number
+    await c.env.DB.prepare(
+      `UPDATE translation_chunk SET content = ?, translator = ?, date_last_modified = ?
+       WHERE text_chunk_id = ? AND draft_number = ?`
+    )
+      .bind(body.content, userId, now, chunkId, draftNumber)
+      .run()
+    created = false
+  }
+
+  return c.json({ draftNumber, translator: userId, dateLastModified: now, created })
 })
 
 libraryRoutes.get('/document/:id/original', async (c) => {
