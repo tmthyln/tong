@@ -255,6 +255,7 @@ libraryRoutes.get('/document/:id', async (c) => {
     label: string | null
     scope: string
     parentId: number | null
+    preferredTranslation: string | null
   }>> = {}
 
   if (chunkIds.length > 0) {
@@ -268,7 +269,8 @@ libraryRoutes.get('/document/:id', async (c) => {
         chunk_end_index,
         label,
         scope,
-        parent_id
+        parent_id,
+        preferred_translation
       FROM extracted_entity
       WHERE source_chunk_id IN (SELECT id FROM text_chunk WHERE source_document_id = ?)`
     )
@@ -283,6 +285,7 @@ libraryRoutes.get('/document/:id', async (c) => {
         label: string | null
         scope: string
         parent_id: number | null
+        preferred_translation: string | null
       }>()
 
     for (const entity of entitiesResult.results) {
@@ -299,6 +302,7 @@ libraryRoutes.get('/document/:id', async (c) => {
         label: entity.label,
         scope: entity.scope,
         parentId: entity.parent_id,
+        preferredTranslation: entity.preferred_translation,
       })
     }
 
@@ -337,7 +341,8 @@ libraryRoutes.get('/document/:id', async (c) => {
   const [allEntitiesResult, chunkRelsResult, docRelsResult] = await Promise.all([
     c.env.DB.prepare(
       `SELECT id, source_chunk_id, entity_type, extracted_text,
-              chunk_start_index, chunk_end_index, label, scope, parent_id
+              chunk_start_index, chunk_end_index, label, scope, parent_id,
+              preferred_translation
        FROM extracted_entity
        WHERE source_document_id = ? AND scope = 'document'
        ORDER BY id`
@@ -353,6 +358,7 @@ libraryRoutes.get('/document/:id', async (c) => {
         label: string | null
         scope: string
         parent_id: number | null
+        preferred_translation: string | null
       }>(),
     c.env.DB.prepare(
       `SELECT er.id, er.from_entity_id, er.to_entity_id, er.edge_type, er.explanation,
@@ -408,6 +414,7 @@ libraryRoutes.get('/document/:id', async (c) => {
     label: e.label,
     scope: e.scope,
     parentId: e.parent_id,
+    preferredTranslation: e.preferred_translation,
   }))
 
   const chunkRelationships = chunkRelsResult.results.map((r) => ({

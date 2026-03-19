@@ -15,6 +15,7 @@ interface Entity {
   label: string | null
   scope: string
   parentId: number | null
+  preferredTranslation: string | null
 }
 
 interface Chunk {
@@ -331,7 +332,7 @@ const toolbar = ref({
   x:              0,   // fixed left of popup (px)
   y:              0,   // fixed top of popup (px)
   text:           '',
-  mode:           'actions' as 'actions' | 'dictionary' | 'entity',
+  mode:           'actions' as 'actions' | 'dictionary' | 'entity' | 'entity-pref',
   results:        [] as DictEntry[],
   loading:        false,
   error:          null as string | null,
@@ -342,6 +343,9 @@ const toolbar = ref({
   disambiguatedEntryId: null as number | null,
   entitySummaryLoading: false as boolean,
   entitySummary:        null as string | null,
+  prefTransInput:       '',
+  prefTransLoading:     false,
+  prefTransQueued:      null as number | null,
 })
 
 const POPUP_W = 320
@@ -611,6 +615,42 @@ async function summarizeEntity() {
   }
 }
 
+function openPrefTranslation() {
+  if (activeEntityId.value == null) return
+  const entity = entityById.value.get(activeEntityId.value)
+  const prefEntity = entity?.parentId != null ? entityById.value.get(entity.parentId) : entity
+  toolbarDragged.value = false
+  toolbar.value = {
+    ...toolbar.value,
+    mode: 'entity-pref',
+    prefTransInput: prefEntity?.preferredTranslation ?? '',
+    prefTransLoading: false,
+    prefTransQueued: null,
+    error: null,
+  }
+}
+
+async function setPreferredTranslation() {
+  if (activeEntityId.value == null || !toolbar.value.prefTransInput.trim()) return
+  toolbar.value.prefTransLoading = true
+  toolbar.value.error = null
+  toolbar.value.prefTransQueued = null
+  try {
+    const res = await fetch(`/api/knowledge/entity/${activeEntityId.value}/preferred-translation`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ preferredTranslation: toolbar.value.prefTransInput.trim() }),
+    })
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    const data = await res.json() as { queued: number }
+    toolbar.value.prefTransQueued = data.queued
+  } catch (e) {
+    toolbar.value.error = e instanceof Error ? e.message : 'Save failed'
+  } finally {
+    toolbar.value.prefTransLoading = false
+  }
+}
+
 onMounted(() => {
   window.document.addEventListener('mousedown', onDocumentMouseDown)
   fetchDocument()
@@ -783,6 +823,52 @@ onUnmounted(() => {
         >
           Summarize
         </v-btn>
+        <v-btn
+          v-if="activeEntityId != null"
+          size="small"
+          variant="text"
+          prepend-icon="mdi-translate"
+          @click="openPrefTranslation"
+        >
+          Set translation
+        </v-btn>
+      </v-card>
+
+      <!-- Entity-pref mode: set preferred translation -->
+      <v-card v-else-if="toolbar.mode === 'entity-pref'" elevation="8" rounded="lg" style="width: 320px;">
+        <div class="d-flex align-center px-3 pt-2 pb-1 popup-header" @pointerdown="onHeaderPointerDown">
+          <span class="text-body-1 font-weight-medium">{{ toolbar.text }}</span>
+          <v-spacer />
+          <v-btn icon="mdi-close" variant="text" size="x-small" @click="toolbar.show = false" @pointerdown.stop />
+        </div>
+        <v-divider />
+        <div class="pa-3">
+          <v-text-field
+            v-model="toolbar.prefTransInput"
+            label="Preferred English translation"
+            density="compact"
+            variant="outlined"
+            hide-details
+            autofocus
+            @keydown.enter="setPreferredTranslation"
+          />
+          <div v-if="toolbar.prefTransQueued != null" class="text-caption text-success mt-2">
+            Saved. {{ toolbar.prefTransQueued }} chunk{{ toolbar.prefTransQueued === 1 ? '' : 's' }} queued for retranslation.
+          </div>
+          <div v-if="toolbar.error" class="text-caption text-error mt-2">{{ toolbar.error }}</div>
+        </div>
+        <v-divider />
+        <div class="px-3 py-2 d-flex justify-end">
+          <v-btn
+            size="small"
+            variant="text"
+            :loading="toolbar.prefTransLoading"
+            :disabled="!toolbar.prefTransInput.trim()"
+            @click="setPreferredTranslation"
+          >
+            Save
+          </v-btn>
+        </div>
       </v-card>
 
       <!-- Entity mode: in-context entity summary -->

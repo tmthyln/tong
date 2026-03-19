@@ -350,3 +350,64 @@ export async function translateChunkLLMWithMTContext(
   const translation = await runTranslation(messages, env)
   await storeTranslation(chunkId, translation, 0, env, 'ai:llama3-mt')
 }
+
+function buildTermPreferenceMessages(
+  content: string,
+  preceding: Array<{ content: string }>,
+  following: Array<{ content: string }>,
+  similar: Array<{ content: string; translation: string }>,
+  preferredTerms: Array<{ text: string; translation: string }>
+) {
+  const parts: string[] = []
+
+  if (preceding.length > 0) {
+    parts.push('=== Preceding context ===')
+    parts.push(preceding.map((c) => c.content).join('\n'))
+  }
+
+  parts.push('=== Text to translate ===')
+  parts.push(content)
+
+  if (following.length > 0) {
+    parts.push('=== Following context ===')
+    parts.push(following.map((c) => c.content).join('\n'))
+  }
+
+  if (similar.length > 0) {
+    parts.push('=== Similar passages (with translations) ===')
+    parts.push(similar.map((s) => `${s.content} → ${s.translation}`).join('\n'))
+  }
+
+  parts.push('=== Preferred term translations ===')
+  parts.push(preferredTerms.map((t) => `「${t.text}」 → "${t.translation}"`).join('\n'))
+
+  parts.push(
+    '\nTranslate only the "Text to translate" section. Use the preferred term translations exactly as specified.'
+  )
+
+  return [
+    { role: 'system' as const, content: SYSTEM_PROMPT },
+    { role: 'user' as const, content: parts.join('\n\n') },
+  ]
+}
+
+export async function retranslateChunkWithTermPreferences(
+  chunkId: number,
+  documentId: number,
+  content: string,
+  preferredTerms: Array<{ text: string; translation: string }>,
+  env: Env
+): Promise<void> {
+  const { preceding, following } = await fetchSurroundingChunks(documentId, chunkId, env)
+  const excludeIds = [chunkId, ...preceding.map((c) => c.id), ...following.map((c) => c.id)]
+  const similar = await fetchSimilarChunksWithTranslations(chunkId, content, excludeIds, env)
+
+  const maxDraftRow = await env.DB.prepare(
+    'SELECT COALESCE(MAX(draft_number), 0) AS max_draft FROM translation_chunk WHERE text_chunk_id = ?'
+  ).bind(chunkId).first<{ max_draft: number }>()
+  const nextDraft = (maxDraftRow?.max_draft ?? 0) + 1
+
+  const messages = buildTermPreferenceMessages(content, preceding, following, similar, preferredTerms)
+  const translation = await runTranslation(messages, env)
+  await storeTranslation(chunkId, translation, nextDraft, env, 'ai:llama3')
+}
