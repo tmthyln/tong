@@ -42,6 +42,7 @@ interface Document {
   uniqueCharCount: number
   parentId: number | null
   extractedContent: string
+  entities: Entity[]
   chunks: Chunk[]
 }
 
@@ -65,6 +66,53 @@ const diffEditorRefs: Record<number, HTMLElement | null> = {}
 const documentTitle = computed(() => {
   if (!document.value) return ''
   return document.value.title || document.value.filename
+})
+
+const entityChips = computed<{ text: string; count: number; color: 'blue' | 'red' }[]>(() => {
+  const doc = document.value
+  if (!doc) return []
+
+  // Document-scoped entities live at doc.entities; count = chunk entities with matching parentId
+  const docEntities = new Map<number, { text: string; count: number; firstSeen: number }>()
+  for (let i = 0; i < doc.entities.length; i++) {
+    const e = doc.entities[i]
+    const label = e.label || e.extractedText || ''
+    if (!label) continue
+    docEntities.set(e.id, { text: label, count: 0, firstSeen: i })
+  }
+  for (const chunk of doc.chunks) {
+    for (const e of chunk.entities) {
+      if (e.parentId == null) continue
+      const parent = docEntities.get(e.parentId)
+      if (parent) parent.count++
+    }
+  }
+
+  // Chunk-scoped orphans: chunk entities with no parentId, grouped by extractedText
+  const chunkGroups = new Map<string, { text: string; count: number; firstSeen: number }>()
+  for (const chunk of doc.chunks) {
+    for (const e of chunk.entities) {
+      if (e.parentId != null) continue
+      const key = e.extractedText || e.label || ''
+      if (!key) continue
+      const pos = chunk.order * 100000 + (e.startIndex ?? 0)
+      const existing = chunkGroups.get(key)
+      if (existing) {
+        existing.count++
+        existing.firstSeen = Math.min(existing.firstSeen, pos)
+      } else {
+        chunkGroups.set(key, { text: key, count: 1, firstSeen: pos })
+      }
+    }
+  }
+
+  const docItems = [...docEntities.values()].sort((a, b) => b.count - a.count || a.firstSeen - b.firstSeen)
+  const chunkItems = [...chunkGroups.values()].sort((a, b) => b.count - a.count || a.firstSeen - b.firstSeen)
+
+  return [
+    ...docItems.map(i => ({ ...i, color: 'blue' as const })),
+    ...chunkItems.map(i => ({ ...i, color: 'red' as const })),
+  ]
 })
 
 
@@ -197,9 +245,12 @@ const activeEntityId   = ref<number | null>(null)
 const activeEntityText = ref<string | null>(null)
 const activeParentId   = ref<number | null>(null)
 
-// Map from chunk entity id → entity, built from all chunks
+// Map from entity id → entity, built from document-level and all chunks
 const entityById = computed<Map<number, Entity>>(() => {
   const map = new Map<number, Entity>()
+  for (const e of document.value?.entities ?? []) {
+    map.set(e.id, e)
+  }
   for (const chunk of document.value?.chunks ?? []) {
     for (const e of chunk.entities) {
       map.set(e.id, e)
@@ -575,27 +626,16 @@ onUnmounted(() => {
       </div>
 
       <v-row class="mb-4" align="center">
-        <v-col cols="auto">
-          <v-chip variant="outlined">
-            {{ document.charCount.toLocaleString() }} characters
-          </v-chip>
+        <v-col>
+          <v-chip
+            v-for="(chip, i) in entityChips"
+            :key="i"
+            :color="chip.color"
+            size="small"
+            variant="tonal"
+            class="mr-1 mb-1"
+          >{{ chip.text }}<span v-if="chip.count > 1" class="ml-1 opacity-60">{{ chip.count }}</span></v-chip>
         </v-col>
-        <v-col cols="auto">
-          <v-chip variant="outlined">
-            {{ document.uniqueCharCount.toLocaleString() }} unique
-          </v-chip>
-        </v-col>
-        <v-col cols="auto">
-          <v-chip variant="outlined">
-            {{ document.chunks.length }} chunks
-          </v-chip>
-        </v-col>
-        <v-col cols="auto">
-          <v-chip variant="outlined">
-            Uploaded {{ new Date(document.dateUploaded).toLocaleDateString() }}
-          </v-chip>
-        </v-col>
-        <v-spacer />
         <v-col cols="auto">
           <v-btn
             :prepend-icon="translationMode ? 'mdi-file-document' : 'mdi-translate'"
