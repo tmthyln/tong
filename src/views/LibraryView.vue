@@ -85,8 +85,6 @@ const uploadTargetFolderId = ref<number | null>(null)
 
 const headers = [
   { title: 'Filename', key: 'original_doc_filename', sortable: true },
-  { title: 'Characters', key: 'extracted_doc_char_count', sortable: true },
-  { title: 'Unique Chars', key: 'extracted_doc_unique_char_count', sortable: true },
   { title: 'Type', key: 'original_doc_mimetype', sortable: true },
   { title: 'Uploaded', key: 'date_uploaded', sortable: true },
   { title: 'Last Accessed', key: 'date_last_accessed', sortable: true },
