@@ -829,7 +829,7 @@ onUnmounted(() => {
             <div class="d-flex align-baseline ga-2 mb-1 flex-wrap">
               <DictHeadword :traditional="entry.traditional" :simplified="entry.simplified" :query-text="toolbar.text" v-slot="{ primary, secondary, swap }">
                 <span class="text-h6 font-weight-light dict-primary" style="line-height: 1.1;" @click="swap">{{ primary }}</span>
-                <span v-if="secondary" class="text-caption text-disabled">{{ secondary }}</span>
+                <span v-if="secondary" class="text-caption text-disabled dict-primary" @click="swap">{{ secondary }}</span>
               </DictHeadword>
               <span class="text-body-2 text-primary font-weight-medium">
                 {{ pinyinToMarked(entry.pinyin) }}

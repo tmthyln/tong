@@ -466,7 +466,7 @@ function fillExample(q: string) {
               <DictHeadword :traditional="entry.traditional" :simplified="entry.simplified" v-slot="{ primary, secondary, swap }">
                 <div class="d-flex flex-column align-center mr-4" style="min-width: 56px;">
                   <span class="text-h4 font-weight-light dict-primary" style="line-height: 1;" @click="swap">{{ primary }}</span>
-                  <span v-if="secondary" class="text-caption text-medium-emphasis mt-1" style="font-size: 0.7rem;">{{ secondary }}</span>
+                  <span v-if="secondary" class="text-caption text-medium-emphasis mt-1 dict-primary" style="font-size: 0.7rem;" @click="swap">{{ secondary }}</span>
                 </div>
               </DictHeadword>
             </template>
@@ -557,7 +557,7 @@ function fillExample(q: string) {
                     <!-- Characters -->
                     <DictHeadword :traditional="entry.traditional" :simplified="entry.simplified" v-slot="{ primary, secondary, swap }">
                       <div class="text-h5 font-weight-light dict-primary" style="line-height: 1.1;" @click="swap">{{ primary }}</div>
-                      <div v-if="secondary" class="text-disabled mb-1" style="font-size: 0.65rem;">{{ secondary }}</div>
+                      <div v-if="secondary" class="text-disabled mb-1 dict-primary" style="font-size: 0.65rem;" @click="swap">{{ secondary }}</div>
                     </DictHeadword>
                     <!-- Pinyin -->
                     <div class="text-caption text-primary font-weight-medium mb-1">
