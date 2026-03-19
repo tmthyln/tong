@@ -3,6 +3,7 @@ import { ref, onMounted, onUnmounted, computed, watch, nextTick } from 'vue'
 import { useRoute } from 'vue-router'
 import { marked } from 'marked'
 import { diffWords } from 'diff'
+import DictHeadword from '../components/DictHeadword.vue'
 
 interface Entity {
   id: number
@@ -786,12 +787,10 @@ onUnmounted(() => {
             :class="{ 'dict-popup-entry--selected': entry.id === toolbar.disambiguatedEntryId }"
           >
             <div class="d-flex align-baseline ga-2 mb-1 flex-wrap">
-              <span class="text-h6 font-weight-light" style="line-height: 1.1;">
-                {{ entry.traditional }}
-              </span>
-              <span v-if="entry.traditional !== entry.simplified" class="text-caption text-disabled">
-                {{ entry.simplified }}
-              </span>
+              <DictHeadword :traditional="entry.traditional" :simplified="entry.simplified" :query-text="toolbar.text" v-slot="{ primary, secondary, swap }">
+                <span class="text-h6 font-weight-light dict-primary" style="line-height: 1.1;" @click="swap">{{ primary }}</span>
+                <span v-if="secondary" class="text-caption text-disabled">{{ secondary }}</span>
+              </DictHeadword>
               <span class="text-body-2 text-primary font-weight-medium">
                 {{ pinyinToMarked(entry.pinyin) }}
               </span>
@@ -1025,6 +1024,11 @@ onUnmounted(() => {
 
 .popup-header:active {
   cursor: grabbing;
+}
+
+.dict-primary {
+  cursor: pointer;
+  user-select: none;
 }
 
 .dict-popup-entry {

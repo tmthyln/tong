@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, watch } from 'vue'
+import DictHeadword from '../components/DictHeadword.vue'
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -462,14 +463,12 @@ function fillExample(q: string) {
             border
           >
             <template #prepend>
-              <div class="d-flex flex-column align-center mr-4" style="min-width: 56px;">
-                <span class="text-h4 font-weight-light" style="line-height: 1;">{{ entry.traditional }}</span>
-                <span
-                  v-if="entry.traditional !== entry.simplified"
-                  class="text-caption text-medium-emphasis mt-1"
-                  style="font-size: 0.7rem;"
-                >{{ entry.simplified }}</span>
-              </div>
+              <DictHeadword :traditional="entry.traditional" :simplified="entry.simplified" v-slot="{ primary, secondary, swap }">
+                <div class="d-flex flex-column align-center mr-4" style="min-width: 56px;">
+                  <span class="text-h4 font-weight-light dict-primary" style="line-height: 1;" @click="swap">{{ primary }}</span>
+                  <span v-if="secondary" class="text-caption text-medium-emphasis mt-1" style="font-size: 0.7rem;">{{ secondary }}</span>
+                </div>
+              </DictHeadword>
             </template>
             <v-list-item-title class="d-flex align-baseline ga-2 mb-1">
               <span class="text-body-1 font-weight-medium" style="letter-spacing: 0.02em;">
@@ -556,14 +555,10 @@ function fillExample(q: string) {
                     class="segment-tile text-center"
                   >
                     <!-- Characters -->
-                    <div class="text-h5 font-weight-light" style="line-height: 1.1;">
-                      {{ entry.traditional }}
-                    </div>
-                    <div
-                      v-if="entry.traditional !== entry.simplified"
-                      class="text-disabled mb-1"
-                      style="font-size: 0.65rem;"
-                    >{{ entry.simplified }}</div>
+                    <DictHeadword :traditional="entry.traditional" :simplified="entry.simplified" v-slot="{ primary, secondary, swap }">
+                      <div class="text-h5 font-weight-light dict-primary" style="line-height: 1.1;" @click="swap">{{ primary }}</div>
+                      <div v-if="secondary" class="text-disabled mb-1" style="font-size: 0.65rem;">{{ secondary }}</div>
+                    </DictHeadword>
                     <!-- Pinyin -->
                     <div class="text-caption text-primary font-weight-medium mb-1">
                       {{ pinyinToMarked(entry.pinyin) }}
@@ -589,6 +584,11 @@ function fillExample(q: string) {
 </template>
 
 <style scoped>
+.dict-primary {
+  cursor: pointer;
+  user-select: none;
+}
+
 .segment-tile {
   min-width: 60px;
   padding: 6px 10px;
