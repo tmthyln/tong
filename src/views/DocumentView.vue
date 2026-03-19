@@ -469,12 +469,15 @@ function onContentMouseUp() {
   setTimeout(() => {
   const sel = window.getSelection()
   if (!sel || sel.isCollapsed || !sel.toString().trim()) return
+
+  const node = sel.getRangeAt(0).startContainer
+  const anchorEl = node.nodeType === Node.TEXT_NODE ? node.parentElement : node as Element
+  if (anchorEl?.closest('.translation-chunk-input')) return
+
   const text = sel.toString().trim()
   const selRect = sel.getRangeAt(0).getBoundingClientRect()
 
-  const node = sel.getRangeAt(0).startContainer
-  const el = (node.nodeType === Node.TEXT_NODE ? node.parentElement : node as Element)
-    ?.closest('[data-chunk-id]')
+  const el = anchorEl?.closest('[data-chunk-id]')
   const chunkId = el ? Number(el.getAttribute('data-chunk-id')) : null
 
   // Store raw selection midpoint; transform handles centering/placement above.
