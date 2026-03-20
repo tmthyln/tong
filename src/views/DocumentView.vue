@@ -61,6 +61,7 @@ const currentDraftIndices = ref<Record<number, number>>({})
 const focusedChunkId = ref<number | null>(null)
 const saveTimers = ref<Record<number, ReturnType<typeof setTimeout>>>({})
 const saveStatus = ref<Record<number, 'saving' | 'saved' | 'error'>>({})
+let gridResizeObserver: ResizeObserver | null = null
 
 interface CompareEntry {
   draftIndex: number
@@ -191,6 +192,7 @@ async function saveTranslation(chunkId: number) {
         currentDraftIndices.value[chunkId] = chunk.availableTranslationDrafts.length
       }
     }
+    computeOverview()
 
     saveStatus.value[chunkId] = 'saved'
     setTimeout(() => {
@@ -296,6 +298,10 @@ async function fetchDocument() {
       throw new Error(data.error || 'Failed to fetch document')
     }
     document.value = await response.json()
+    if (translationMode.value) {
+      await nextTick()
+      computeOverview()
+    }
   } catch (err) {
     error.value = err instanceof Error ? err.message : 'Failed to load document'
   } finally {
@@ -447,6 +453,82 @@ function clampToViewport() {
   if (rect.top < topMin)
     toolbar.value.y += topMin - rect.top
 }
+
+function resolveThemeColor(varName: string): string {
+  const raw = getComputedStyle(window.document.documentElement).getPropertyValue(varName).trim()
+  return `rgba(${raw}, 0.65)`
+}
+
+function updateScrollbarStyle(segments: Array<{ topPct: number; bottomPct: number; color: string }> | null) {
+  const id = 'tong-chunk-scrollbar'
+  let styleEl = window.document.getElementById(id) as HTMLStyleElement | null
+  if (!styleEl) {
+    styleEl = window.document.createElement('style')
+    styleEl.id = id
+    window.document.head.appendChild(styleEl)
+  }
+  if (!segments || segments.length === 0) {
+    styleEl.textContent = ''
+    return
+  }
+  const sorted = [...segments].sort((a, b) => a.topPct - b.topPct)
+  const stops: string[] = []
+  let lastEnd = 0
+  for (const seg of sorted) {
+    const start = Math.max(seg.topPct, lastEnd)
+    if (start > lastEnd) stops.push(`transparent ${lastEnd.toFixed(3)}% ${start.toFixed(3)}%`)
+    stops.push(`${seg.color} ${start.toFixed(3)}% ${seg.bottomPct.toFixed(3)}%`)
+    lastEnd = seg.bottomPct
+  }
+  if (lastEnd < 100) stops.push(`transparent ${lastEnd.toFixed(3)}% 100%`)
+  const gradient = `linear-gradient(to bottom, ${stops.join(', ')})`
+  styleEl.textContent = [
+    '::-webkit-scrollbar { width: 12px; }',
+    `::-webkit-scrollbar-track { background: ${gradient}; }`,
+    '::-webkit-scrollbar-thumb { background: rgba(100,100,100,0.9); border-radius: 6px; border: 2px solid rgba(255,255,255,0.35); }',
+    '::-webkit-scrollbar-thumb:hover { background: rgba(60,60,60,0.95); border-radius: 6px; border: 2px solid rgba(255,255,255,0.35); }',
+  ].join('\n')
+}
+
+function computeOverview() {
+  if (!translationMode.value || !document.value) {
+    updateScrollbarStyle(null)
+    return
+  }
+  const totalHeight = window.document.documentElement.scrollHeight
+  if (totalHeight === 0) return
+  const segments: Array<{ topPct: number; bottomPct: number; color: string }> = []
+  for (const chunk of document.value.chunks) {
+    const status = translatorStatus(chunk)
+    let colorVar: string
+    if (status === 'ai') colorVar = '--v-theme-warning'
+    else if (status === 'self') colorVar = '--v-theme-success'
+    else if (status === 'other') colorVar = '--v-theme-primary'
+    else continue
+    const el = window.document.querySelector<HTMLElement>(`[data-chunk-id="${chunk.id}"]`)
+    if (!el) continue
+    const rect = el.getBoundingClientRect()
+    const topPct = (rect.top + window.scrollY) / totalHeight * 100
+    segments.push({ topPct, bottomPct: topPct + rect.height / totalHeight * 100, color: resolveThemeColor(colorVar) })
+  }
+  updateScrollbarStyle(segments)
+}
+
+watch(translationMode, async (val) => {
+  if (!val) {
+    updateScrollbarStyle(null)
+    gridResizeObserver?.disconnect()
+    gridResizeObserver = null
+    return
+  }
+  await nextTick()
+  computeOverview()
+  const grid = window.document.querySelector<HTMLElement>('.translation-grid')
+  if (grid) {
+    gridResizeObserver = new ResizeObserver(computeOverview)
+    gridResizeObserver.observe(grid)
+  }
+})
 
 // Re-clamp whenever the explanation or entity summary loads (popup height grows).
 watch(() => toolbar.value.explanation, async (val) => {
@@ -707,6 +789,7 @@ async function setPreferredTranslation() {
 
 onMounted(() => {
   window.document.addEventListener('mousedown', onDocumentMouseDown)
+  window.addEventListener('resize', computeOverview)
   fetchDocument()
 })
 
@@ -714,7 +797,10 @@ onUnmounted(() => {
   window.document.removeEventListener('mousedown', onDocumentMouseDown)
   window.removeEventListener('pointermove', onDragMove)
   window.removeEventListener('pointerup', onDragEnd)
+  window.removeEventListener('resize', computeOverview)
   for (const timer of Object.values(saveTimers.value)) clearTimeout(timer)
+  gridResizeObserver?.disconnect()
+  window.document.getElementById('tong-chunk-scrollbar')?.remove()
 })
 </script>
 
@@ -1043,6 +1129,7 @@ onUnmounted(() => {
 
     </div>
   </Teleport>
+
 </template>
 
 <style scoped>
@@ -1292,4 +1379,5 @@ onUnmounted(() => {
   outline: 1px solid rgba(var(--v-theme-error), 0.5);
   border-radius: 2px;
 }
+
 </style>
