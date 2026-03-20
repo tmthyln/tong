@@ -208,7 +208,7 @@ function scheduleSave(chunkId: number) {
   saveTimers.value[chunkId] = setTimeout(() => {
     delete saveTimers.value[chunkId]
     saveTranslation(chunkId)
-  }, 5000)
+  }, 3000)
 }
 
 async function loadDraft(chunk: Chunk, draftIndex: number) {
