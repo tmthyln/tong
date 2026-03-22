@@ -23,6 +23,23 @@ function sanitizeFts5(q: string): string {
   return q.replace(/["()^]/g, '').trim()
 }
 
+// Appends * to each space-separated part that ends in an ASCII letter (a pinyin
+// syllable with no explicit tone digit), so FTS5 prefix-matches the tokenised
+// syllable regardless of which tone digit was stored alongside it.
+// The FTS5 unicode61 tokeniser strips digits, so "si4 ma3" is indexed as
+// tokens ["si", "ma"] — "si*" prefix-matches "si", "si4*" would not.
+// Parts already ending in a digit, wildcard, or non-ASCII char are left alone.
+//   "si ma dang"  → "si* ma* dang*"
+//   "ren5"        → "ren5"
+//   "ni3 hao"     → "ni3 hao*"
+//   "你好"         → "你好"
+function addPinyinWildcards(sanitized: string): string {
+  return sanitized.split(' ').filter(p => p.length > 0).map(part => {
+    if (!/[a-zA-Z]$/.test(part)) return part
+    return `${part}*`
+  }).join(' ')
+}
+
 // Returns true if the pattern needs LIKE semantics (underscore wildcard, or *
 // not just at the end — FTS5 only supports trailing prefix wildcards).
 function needsLike(pattern: string): boolean {
@@ -82,11 +99,12 @@ dictionaryRoutes.get('/search', async (c) => {
       const sanitized = sanitizeFts5(q)
       // headwords=1: restrict FTS match to the character columns only
       // (FTS5 column filter syntax: {col1 col2}:term)
-      const ftsQ = headwordsOnly
-        ? `{simplified traditional}:${sanitized}`
-        : /^[a-zA-Z0-9\s]+$/.test(q) && !q.endsWith('*')
-          ? sanitized + '*'
-          : sanitized
+      const withWildcards = addPinyinWildcards(sanitized)
+      const base = withWildcards !== sanitized
+        ? withWildcards
+        : /^[a-zA-Z0-9\s]+$/.test(q) && !q.endsWith('*') ? sanitized + '*' : sanitized
+      // headwords=1: restrict to character + pinyin columns (exclude definitions)
+      const ftsQ = headwordsOnly ? `{simplified traditional pinyin}:${base}` : base
       if (ftsQ) ftsMatchParts.push(ftsQ)
     }
   }
