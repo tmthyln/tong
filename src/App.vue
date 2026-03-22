@@ -54,7 +54,7 @@ const navItems = [
     >
       <v-list>
         <v-list-item
-          prepend-icon="mdi-account-circle"
+          :prepend-icon="userType === 'public' ? 'mdi-incognito' : userType === 'test' ? 'mdi-flask-outline' : 'mdi-account-circle'"
           :title="displayName"
           :subtitle="userSubtitle"
         >
