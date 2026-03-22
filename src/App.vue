@@ -20,6 +20,14 @@ const { userType, displayName, expiresIn, fetchUser, login, logout, createTestAc
 const { fetchPreferences } = usePreferences()
 
 const selectedAccount = ref<string>('alice')
+const accountMenuOpen = ref(false)
+
+const userSubtitle = computed(() => {
+  if (userType.value === 'test' && expiresIn.value)
+    return expiresIn.value === 'Expired' ? 'Expired' : `Expires in ${expiresIn.value}`
+  if (userType.value === 'public') return 'Read-Only'
+  return 'Authenticated'
+})
 
 onMounted(() => {
   fetchUser()
@@ -41,34 +49,40 @@ const navItems = [
   <v-app>
     <v-navigation-drawer
       v-model="drawer"
-      expand-on-hover
-      rail
+      :expand-on-hover="!accountMenuOpen"
+      :rail="!accountMenuOpen"
     >
       <v-list>
         <v-list-item
           prepend-icon="mdi-account-circle"
           :title="displayName"
-          :subtitle="userType === 'public' ? 'Public Read-Only User' : userType === 'authenticated' ? 'Authenticated User' : 'Test User'"
-        />
-        <v-list-item v-if="userType === 'public'" class="px-2 pb-2">
-          <v-select
-            v-model="selectedAccount"
-            :items="['alice', 'bob']"
-            label="Account"
-            density="compact"
-            hide-details
-            class="mb-2"
-          />
-          <div class="d-flex ga-2">
-            <v-btn size="small" variant="tonal" @click="login(selectedAccount)">Sign in</v-btn>
-            <v-btn size="small" variant="tonal" @click="createTestAccount">Test account</v-btn>
-          </div>
-        </v-list-item>
-        <v-list-item v-else class="px-2 pb-2">
-          <div v-if="userType === 'test' && expiresIn" class="text-caption text-medium-emphasis mb-2">
-            {{ expiresIn === 'Expired' ? 'Expired' : `Expires in ${expiresIn}` }}
-          </div>
-          <v-btn size="small" variant="tonal" @click="logout">Sign out</v-btn>
+          :subtitle="userSubtitle"
+        >
+          <template #append>
+            <v-menu v-model="accountMenuOpen" location="bottom end">
+              <template #activator="{ props }">
+                <v-btn icon="mdi-dots-vertical" variant="text" size="small" v-bind="props" />
+              </template>
+              <v-card v-if="userType === 'public'" min-width="200">
+                <v-card-text class="pb-1 pt-3">
+                  <v-select
+                    v-model="selectedAccount"
+                    :items="['alice', 'bob']"
+                    label="Account"
+                    density="compact"
+                    hide-details
+                  />
+                </v-card-text>
+                <v-list density="compact">
+                  <v-list-item prepend-icon="mdi-login" title="Sign in" @click="login(selectedAccount)" />
+                  <v-list-item prepend-icon="mdi-account-plus-outline" title="Test account" @click="createTestAccount" />
+                </v-list>
+              </v-card>
+              <v-list v-else density="compact" min-width="160">
+                <v-list-item prepend-icon="mdi-logout" title="Sign out" @click="logout" />
+              </v-list>
+            </v-menu>
+          </template>
         </v-list-item>
       </v-list>
 
