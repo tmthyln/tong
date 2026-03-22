@@ -66,7 +66,7 @@ const navItems = [
         </v-list-item>
         <v-list-item v-else class="px-2 pb-2">
           <div v-if="userType === 'test' && expiresIn" class="text-caption text-medium-emphasis mb-2">
-            Expires in {{ expiresIn }}
+            {{ expiresIn === 'Expired' ? 'Expired' : `Expires in ${expiresIn}` }}
           </div>
           <v-btn size="small" variant="tonal" @click="logout">Sign out</v-btn>
         </v-list-item>
