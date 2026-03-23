@@ -1,6 +1,9 @@
 import { Hono } from 'hono'
 import { getUserId, userType } from '../lib/auth'
 import { retranslateChunkWithTermPreferences } from '../lib/translation'
+import { resolveDocumentCoreference } from '../lib/coreference'
+import { extractRelationshipsForEdgeType } from '../lib/relationship-extraction'
+import type { EdgeTypeInput } from '../lib/relationship-extraction'
 
 const knowledgeRoutes = new Hono<{ Bindings: Env }>()
 
@@ -165,5 +168,184 @@ knowledgeRoutes.patch('/entity/:id/preferred-translation', async (c) => {
 
   return c.json({ queued: chunkIds.length })
 })
+
+// POST /api/knowledge/entity
+//
+// Manually create a chunk-scoped entity from selected text.
+// Body: { text, entityType, chunkId, documentId }
+// Returns: { ids: number[] }  (one per occurrence of text in the chunk)
+// Side-effects (async): coreference resolution + windowed relationship extraction.
+knowledgeRoutes.post('/entity', async (c) => {
+  if (userType(getUserId(c)) === 'public') {
+    return c.json({ error: 'Unauthorized' }, 401)
+  }
+
+  const { text, entityType, chunkId, documentId } = await c.req.json<{
+    text: string
+    entityType: string
+    chunkId: number
+    documentId: number
+  }>()
+
+  if (!text?.trim() || !entityType?.trim()) {
+    return c.json({ error: 'text and entityType are required' }, 400)
+  }
+
+  const chunk = await c.env.DB
+    .prepare('SELECT content FROM text_chunk WHERE id = ?')
+    .bind(chunkId)
+    .first<{ content: string }>()
+  if (!chunk) return c.json({ error: 'Chunk not found' }, 404)
+
+  // Insert one entity row per occurrence of text in the chunk content.
+  const insertedIds: number[] = []
+  let searchFrom = 0
+  while (true) {
+    const pos = chunk.content.indexOf(text, searchFrom)
+    if (pos === -1) break
+    const row = await c.env.DB
+      .prepare(
+        `INSERT INTO extracted_entity
+          (source_document_id, source_chunk_id, entity_type, extracted_text, scope, chunk_start_index, chunk_end_index)
+         VALUES (?, ?, ?, ?, 'chunk', ?, ?)
+         RETURNING id`
+      )
+      .bind(documentId, chunkId, entityType, text, pos, pos + text.length)
+      .first<{ id: number }>()
+    if (row) insertedIds.push(row.id)
+    searchFrom = pos + text.length
+  }
+
+  if (insertedIds.length === 0) {
+    return c.json({ error: 'Text not found in chunk content' }, 422)
+  }
+
+  c.executionCtx.waitUntil(
+    (async () => {
+      await resolveDocumentCoreference(documentId, c.env)
+      await extractAndPersistChunkRelationships(chunkId, documentId, c.env)
+    })()
+  )
+
+  return c.json({ ids: insertedIds })
+})
+
+async function extractAndPersistChunkRelationships(
+  chunkId: number,
+  documentId: number,
+  env: Env
+): Promise<void> {
+  const chunkRow = await env.DB
+    .prepare('SELECT chunk_order FROM text_chunk WHERE id = ?')
+    .bind(chunkId)
+    .first<{ chunk_order: number }>()
+  if (!chunkRow) return
+
+  const order = chunkRow.chunk_order
+
+  const windowRows = await env.DB
+    .prepare(
+      `SELECT id FROM text_chunk WHERE source_document_id = ?
+       AND chunk_order BETWEEN ? AND ? ORDER BY chunk_order`
+    )
+    .bind(documentId, order - 3, order + 3)
+    .all<{ id: number }>()
+
+  const windowChunkIds = windowRows.results.map((r) => r.id)
+  if (windowChunkIds.length === 0) return
+
+  const ph = windowChunkIds.map(() => '?').join(', ')
+
+  const [contentRow, entityRows, edgeTypeRows, edgeExampleRows] = await Promise.all([
+    env.DB.prepare(
+      `SELECT GROUP_CONCAT(content, char(10)) AS window_content
+       FROM (SELECT content FROM text_chunk WHERE id IN (${ph}) ORDER BY chunk_order)`
+    )
+      .bind(...windowChunkIds)
+      .first<{ window_content: string }>(),
+    env.DB.prepare(
+      `SELECT id, entity_type, extracted_text FROM extracted_entity
+       WHERE source_chunk_id IN (${ph}) AND scope = 'chunk' AND extracted_text IS NOT NULL`
+    )
+      .bind(...windowChunkIds)
+      .all<{ id: number; entity_type: string; extracted_text: string }>(),
+    env.DB.prepare('SELECT id, name, reverse_name, definition FROM edge_type ORDER BY name')
+      .all<{ id: number; name: string; reverse_name: string | null; definition: string }>(),
+    env.DB.prepare('SELECT edge_type_id, example FROM edge_type_example ORDER BY id')
+      .all<{ edge_type_id: number; example: string }>(),
+  ])
+
+  const windowContent = contentRow?.window_content ?? ''
+  const entities = entityRows.results.map((r) => ({ nodeType: r.entity_type, text: r.extracted_text }))
+
+  const exByEdge: Record<number, string[]> = {}
+  for (const ex of edgeExampleRows.results) {
+    if (!exByEdge[ex.edge_type_id]) exByEdge[ex.edge_type_id] = []
+    exByEdge[ex.edge_type_id].push(ex.example)
+  }
+  const edgeTypes: EdgeTypeInput[] = edgeTypeRows.results.map((et) => ({
+    name: et.name,
+    reverseName: et.reverse_name,
+    definition: et.definition,
+    examples: exByEdge[et.id] ?? [],
+  }))
+
+  if (edgeTypes.length === 0 || entities.length < 2) return
+
+  const allRels: Array<{ fromText: string; toText: string; edgeType: string; explanation: string }> = []
+  for (const edgeType of edgeTypes) {
+    const rels = await extractRelationshipsForEdgeType(windowContent, entities, edgeType, env)
+    allRels.push(...rels)
+  }
+
+  if (allRels.length === 0) return
+
+  const textToIds = new Map<string, number[]>()
+  for (const e of entityRows.results) {
+    const arr = textToIds.get(e.extracted_text)
+    if (arr) arr.push(e.id)
+    else textToIds.set(e.extracted_text, [e.id])
+  }
+
+  const existingRows = await env.DB
+    .prepare(
+      `SELECT from_entity_id, to_entity_id, edge_type FROM extracted_relationship
+       WHERE source_document_id = ? AND scope = 'chunk'`
+    )
+    .bind(documentId)
+    .all<{ from_entity_id: number; to_entity_id: number; edge_type: string }>()
+
+  const existingKeys = new Set(
+    existingRows.results.map((r) => `${r.from_entity_id}|${r.to_entity_id}|${r.edge_type}`)
+  )
+
+  const toInsert: Array<{ fromId: number; toId: number; edgeType: string; explanation: string }> = []
+  const seen = new Set<string>()
+
+  for (const rel of allRels) {
+    const fromIds = textToIds.get(rel.fromText) ?? []
+    const toIds = textToIds.get(rel.toText) ?? []
+    for (const fromId of fromIds) {
+      for (const toId of toIds) {
+        if (fromId === toId) continue
+        const key = `${fromId}|${toId}|${rel.edgeType}`
+        if (existingKeys.has(key) || seen.has(key)) continue
+        seen.add(key)
+        toInsert.push({ fromId, toId, edgeType: rel.edgeType, explanation: rel.explanation })
+      }
+    }
+  }
+
+  if (toInsert.length > 0) {
+    const stmt = env.DB.prepare(
+      `INSERT INTO extracted_relationship
+        (source_document_id, from_entity_id, to_entity_id, edge_type, explanation, scope)
+       VALUES (?, ?, ?, ?, ?, 'chunk')`
+    )
+    await env.DB.batch(
+      toInsert.map((r) => stmt.bind(documentId, r.fromId, r.toId, r.edgeType, r.explanation))
+    )
+  }
+}
 
 export default knowledgeRoutes

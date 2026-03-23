@@ -389,7 +389,7 @@ const toolbar = ref({
   x:              0,   // fixed left of popup (px)
   y:              0,   // fixed top of popup (px)
   text:           '',
-  mode:           'actions' as 'actions' | 'dictionary' | 'entity' | 'entity-pref',
+  mode:           'actions' as 'actions' | 'dictionary' | 'entity' | 'entity-pref' | 'entity-create',
   results:        [] as DictEntry[],
   loading:        false,
   error:          null as string | null,
@@ -403,6 +403,9 @@ const toolbar = ref({
   prefTransInput:       '',
   prefTransLoading:     false,
   prefTransQueued:      null as number | null,
+  createEntityTypes:    [] as string[],
+  createEntityType:     '',
+  createEntityLoading:  false,
 })
 
 const POPUP_W = 320
@@ -624,6 +627,8 @@ function onContentMouseUp() {
     chunkId, explanation: null, explainLoading: false,
     disambiguateLoading: false, disambiguatedEntryId: null,
     entitySummaryLoading: false, entitySummary: null,
+    prefTransInput: '', prefTransLoading: false, prefTransQueued: null,
+    createEntityTypes: [], createEntityType: '', createEntityLoading: false,
   }
   }, 0)
 }
@@ -631,6 +636,7 @@ function onContentMouseUp() {
 function onDocumentMouseDown(e: MouseEvent) {
   if (toolbarRef.value?.contains(e.target as Node)) return
   if ((e.target as Element).closest?.('.entity-underline')) return  // onContentClick handles this
+  if ((e.target as Element).closest?.('.v-overlay')) return         // Vuetify menus/selects
   toolbar.value.show = false
   activeEntityId.value   = null
   activeEntityText.value = null
@@ -659,6 +665,8 @@ function onContentClick(e: MouseEvent) {
     chunkId, explanation: null, explainLoading: false,
     disambiguateLoading: false, disambiguatedEntryId: null,
     entitySummaryLoading: false, entitySummary: null,
+    prefTransInput: '', prefTransLoading: false, prefTransQueued: null,
+    createEntityTypes: [], createEntityType: '', createEntityLoading: false,
   }
 }
 
@@ -784,6 +792,57 @@ async function setPreferredTranslation() {
     toolbar.value.error = e instanceof Error ? e.message : 'Save failed'
   } finally {
     toolbar.value.prefTransLoading = false
+  }
+}
+
+async function openEntityCreate() {
+  if (!toolbar.value.chunkId || !document.value) return
+  toolbarDragged.value = false
+  toolbar.value = {
+    ...toolbar.value,
+    mode: 'entity-create',
+    createEntityTypes: [],
+    createEntityType: '',
+    createEntityLoading: true,
+    error: null,
+  }
+  try {
+    const res = await fetch('/api/graph-types/node-type')
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    const data = await res.json() as Array<{ name: string }>
+    toolbar.value.createEntityTypes = data.map((t) => t.name)
+    toolbar.value.createEntityType = data[0]?.name ?? ''
+  } catch (e) {
+    toolbar.value.error = e instanceof Error ? e.message : 'Failed to load types'
+  } finally {
+    toolbar.value.createEntityLoading = false
+    await nextTick()
+    clampToViewport()
+  }
+}
+
+async function createEntity() {
+  if (!toolbar.value.chunkId || !document.value || !toolbar.value.createEntityType || !toolbar.value.text) return
+  toolbar.value.createEntityLoading = true
+  toolbar.value.error = null
+  try {
+    const res = await fetch('/api/knowledge/entity', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        text: toolbar.value.text,
+        entityType: toolbar.value.createEntityType,
+        chunkId: toolbar.value.chunkId,
+        documentId: document.value.id,
+      }),
+    })
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    toolbar.value.show = false
+    await fetchDocument()
+  } catch (e) {
+    toolbar.value.error = e instanceof Error ? e.message : 'Create failed'
+  } finally {
+    toolbar.value.createEntityLoading = false
   }
 }
 
@@ -977,6 +1036,52 @@ onUnmounted(() => {
         >
           Set translation
         </v-btn>
+        <v-btn
+          v-if="activeEntityId == null && toolbar.chunkId != null"
+          size="small"
+          variant="text"
+          prepend-icon="mdi-tag-plus-outline"
+          @click="openEntityCreate"
+        >
+          Create entity
+        </v-btn>
+      </v-card>
+
+      <!-- Entity-create mode: create entity from selected text -->
+      <v-card v-else-if="toolbar.mode === 'entity-create'" elevation="8" rounded="lg" style="width: 320px;">
+        <div class="d-flex align-center px-3 pt-2 pb-1 popup-header" @pointerdown="onHeaderPointerDown">
+          <span class="text-body-1 font-weight-medium">{{ toolbar.text }}</span>
+          <v-spacer />
+          <v-btn icon="mdi-close" variant="text" size="x-small" @click="toolbar.show = false" @pointerdown.stop />
+        </div>
+        <v-divider />
+        <div class="pa-3">
+          <div v-if="toolbar.createEntityLoading && toolbar.createEntityTypes.length === 0" class="d-flex justify-center py-3">
+            <v-progress-circular indeterminate color="primary" size="24" />
+          </div>
+          <v-select
+            v-else
+            v-model="toolbar.createEntityType"
+            :items="toolbar.createEntityTypes"
+            label="Entity type"
+            density="compact"
+            variant="outlined"
+            hide-details
+          />
+          <div v-if="toolbar.error" class="text-caption text-error mt-2">{{ toolbar.error }}</div>
+        </div>
+        <v-divider />
+        <div class="px-3 py-2 d-flex justify-end">
+          <v-btn
+            size="small"
+            variant="text"
+            :loading="toolbar.createEntityLoading"
+            :disabled="!toolbar.createEntityType"
+            @click="createEntity"
+          >
+            Create
+          </v-btn>
+        </div>
       </v-card>
 
       <!-- Entity-pref mode: set preferred translation -->
