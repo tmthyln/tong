@@ -356,7 +356,8 @@ function buildTermPreferenceMessages(
   preceding: Array<{ content: string }>,
   following: Array<{ content: string }>,
   similar: Array<{ content: string; translation: string }>,
-  preferredTerms: Array<{ text: string; translation: string }>
+  preferredTerms: Array<{ text: string; translation: string }>,
+  existingTranslation: string
 ) {
   const parts: string[] = []
 
@@ -378,11 +379,14 @@ function buildTermPreferenceMessages(
     parts.push(similar.map((s) => `${s.content} → ${s.translation}`).join('\n'))
   }
 
+  parts.push('=== Current translation ===')
+  parts.push(existingTranslation)
+
   parts.push('=== Preferred term translations ===')
   parts.push(preferredTerms.map((t) => `「${t.text}」 → "${t.translation}"`).join('\n'))
 
   parts.push(
-    '\nTranslate only the "Text to translate" section. Use the preferred term translations exactly as specified.'
+    '\nReview the current translation in light of the preferred term above.\nIf the source text contains the entity, revise the translation to use the preferred\nrendering. If no change is warranted, return the translation as-is.'
   )
 
   return [
@@ -402,12 +406,18 @@ export async function retranslateChunkWithTermPreferences(
   const excludeIds = [chunkId, ...preceding.map((c) => c.id), ...following.map((c) => c.id)]
   const similar = await fetchSimilarChunksWithTranslations(chunkId, content, excludeIds, env)
 
-  const maxDraftRow = await env.DB.prepare(
-    'SELECT COALESCE(MAX(draft_number), 0) AS max_draft FROM translation_chunk WHERE text_chunk_id = ?'
-  ).bind(chunkId).first<{ max_draft: number }>()
+  const [maxDraftRow, latestDraftRow] = await Promise.all([
+    env.DB.prepare(
+      'SELECT COALESCE(MAX(draft_number), 0) AS max_draft FROM translation_chunk WHERE text_chunk_id = ?'
+    ).bind(chunkId).first<{ max_draft: number }>(),
+    env.DB.prepare(
+      'SELECT content FROM translation_chunk WHERE text_chunk_id = ? ORDER BY draft_number DESC LIMIT 1'
+    ).bind(chunkId).first<{ content: string }>(),
+  ])
   const nextDraft = (maxDraftRow?.max_draft ?? 0) + 1
+  const existingTranslation = latestDraftRow?.content ?? ''
 
-  const messages = buildTermPreferenceMessages(content, preceding, following, similar, preferredTerms)
+  const messages = buildTermPreferenceMessages(content, preceding, following, similar, preferredTerms, existingTranslation)
   const translation = await runTranslation(messages, env)
   await storeTranslation(chunkId, translation, nextDraft, env, 'ai:llama3')
 }
