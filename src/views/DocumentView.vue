@@ -36,7 +36,7 @@ const entityChips = computed<{ text: string; count: number; color: 'blue' | 'red
   // Document-scoped entities live at doc.entities; count = chunk entities with matching parentId
   const docEntities = new Map<number, { text: string; count: number; firstSeen: number }>()
   for (let i = 0; i < doc.entities.length; i++) {
-    const e = doc.entities[i]
+    const e = doc.entities[i]!
     const label = e.label || e.extractedText || ''
     if (!label) continue
     docEntities.set(e.id, { text: label, count: 0, firstSeen: i })
@@ -105,7 +105,7 @@ function renderChunk(chunk: Chunk): string {
   // Process from end to start to preserve indices
   let content = chunk.content
   for (let i = entities.length - 1; i >= 0; i--) {
-    const e = entities[i]
+    const e = entities[i]!
     const tooltip = e.label ? `${e.entityType}: ${e.label}` : e.entityType
     const before = content.slice(0, e.startIndex)
     const text = content.slice(e.startIndex, e.endIndex)
