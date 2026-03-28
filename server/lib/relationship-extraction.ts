@@ -14,7 +14,8 @@ export interface ExtractedRelationship {
   explanation: string
 }
 
-const MODEL = '@cf/meta/llama-3.3-70b-instruct-fp8-fast' as BaseAiTextGenerationModels
+const MODEL = '@cf/meta/llama-3.3-70b-instruct-fp8-fast'
+type ModelOutput = AiModels[typeof MODEL]['postProcessedOutputs']
 
 /**
  * Extract relationships of a single edge type from a chunk of text.
@@ -67,10 +68,11 @@ Example response format: {"relationships": [{"from": "北京", "to": "中国", "
 }
 
 function parseResponse(
-  result: AiTextGenerationOutput,
+  result: ModelOutput,
   entities: Array<{ text: string }>,
   edgeTypeName: string
 ): ExtractedRelationship[] {
+  if (typeof result === 'string') return []
   let parsed: { relationships?: Array<{ from: string; to: string; explanation?: string }> } | null = null
 
   if ('response' in result && typeof result.response === 'string') {

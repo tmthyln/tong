@@ -13,7 +13,8 @@ export interface ExtractedEntity {
 
 import { extractJsonObject } from './llm-utils'
 
-const MODEL = '@cf/meta/llama-3.3-70b-instruct-fp8-fast' as BaseAiTextGenerationModels
+const MODEL = '@cf/meta/llama-3.3-70b-instruct-fp8-fast'
+type ModelOutput = AiModels[typeof MODEL]['postProcessedOutputs']
 
 /**
  * Extract entities for a subset of node types from a chunk of text.
@@ -81,10 +82,11 @@ Example response format: {"entities": [{"text": "北京"}, {"text": "上海"}]}`
 }
 
 function parseResponse(
-  result: AiTextGenerationOutput,
+  result: ModelOutput,
   chunkContent: string,
   nodeTypeName: string
 ): ExtractedEntity[] {
+  if (typeof result === 'string') return []
   // Handle different response formats
   let parsed: { entities?: Array<{ text: string }> } | Array<{ text: string }> | null = null
 
@@ -220,9 +222,9 @@ Reply with JSON { "resolutions": [ { "text": "<exact text>", "nodeType": "<chose
     })
 
     let parsed: { resolutions?: Array<{ text: string; nodeType: string }> } | null = null
-    if ('response' in result && typeof result.response === 'string') {
+    if (typeof result !== 'string' && 'response' in result && typeof result.response === 'string') {
       parsed = JSON.parse(extractJsonObject(result.response))
-    } else if ('response' in result && result.response && typeof result.response === 'object') {
+    } else if (typeof result !== 'string' && 'response' in result && result.response && typeof result.response === 'object') {
       parsed = result.response as typeof parsed
     }
     if (parsed?.resolutions && Array.isArray(parsed.resolutions)) {

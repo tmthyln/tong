@@ -1,6 +1,7 @@
 import { extractJsonObject } from './llm-utils'
 
-const MODEL = '@cf/meta/llama-3.3-70b-instruct-fp8-fast' as BaseAiTextGenerationModels
+const MODEL = '@cf/meta/llama-3.3-70b-instruct-fp8-fast'
+type ModelOutput = AiModels[typeof MODEL]['postProcessedOutputs']
 
 interface ChunkEntity {
   id: number
@@ -29,7 +30,8 @@ function normalizedEditDistance(a: string, b: string): number {
   return dp[n] / Math.max(m, n)
 }
 
-function parseLLMResponse(result: AiTextGenerationOutput): Record<string, unknown> | null {
+function parseLLMResponse(result: ModelOutput): Record<string, unknown> | null {
+  if (typeof result === 'string') return null
   if ('response' in result && typeof result.response === 'string') {
     const raw = result.response // read before any exception can leave it undisposed
     return JSON.parse(extractJsonObject(raw)) as Record<string, unknown>
@@ -260,7 +262,7 @@ Reply with JSON { "groups": [[id, id, ...], ...] }`
         })
 
         let raw = ''
-        if ('response' in result && typeof result.response === 'string') {
+        if (typeof result !== 'string' && 'response' in result) {
           raw = result.response.trim()
         }
         label = raw || texts[0]
