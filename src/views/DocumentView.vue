@@ -2,74 +2,19 @@
 import { ref, onMounted, onUnmounted, computed, watch, nextTick } from 'vue'
 import { useRoute } from 'vue-router'
 import { marked } from 'marked'
-import { diffWords } from 'diff'
 import DictHeadword from '../components/DictHeadword.vue'
 import { useUser } from '../composables/useUser'
-
-interface Entity {
-  id: number
-  entityType: string
-  extractedText: string | null
-  startIndex: number | null
-  endIndex: number | null
-  label: string | null
-  scope: string
-  parentId: number | null
-  preferredTranslation: string | null
-}
-
-interface Chunk {
-  id: number
-  order: number
-  startIndex: number
-  endIndex: number
-  content: string
-  charCount: number
-  uniqueCharCount: number
-  entities: Entity[]
-  translation: string | null
-  translationDraftNumber: number | null
-  translationTranslator: string | null
-  translationDateLastModified: string | null
-  availableTranslationDrafts: number[]
-}
-
-interface Document {
-  id: number
-  title: string | null
-  filename: string
-  mimetype: string
-  dateUploaded: string
-  dateLastAccessed: string | null
-  dateLastModified: string | null
-  charCount: number
-  uniqueCharCount: number
-  parentId: number | null
-  extractedContent: string
-  entities: Entity[]
-  chunks: Chunk[]
-}
+import { pinyinToMarked } from '../utils/pinyin'
+import { useTranslation } from '../composables/useTranslation'
+import { useSelectionToolbar } from '../composables/useSelectionToolbar'
+import type { Entity, Chunk, Document } from '../types/document'
 
 const route = useRoute()
 const { userId } = useUser()
 const document = ref<Document | null>(null)
 const loading = ref(false)
 const error = ref<string | null>(null)
-const translationMode = ref(false)
-const translations = ref<Record<number, string>>({})
-const currentDraftIndices = ref<Record<number, number>>({})
-const focusedChunkId = ref<number | null>(null)
-const saveTimers = ref<Record<number, ReturnType<typeof setTimeout>>>({})
-const saveStatus = ref<Record<number, 'saving' | 'saved' | 'error'>>({})
 let gridResizeObserver: ResizeObserver | null = null
-
-interface CompareEntry {
-  draftIndex: number
-  oldHtml: string
-}
-const compareState = ref<Record<number, CompareEntry | null>>({})
-const draftMenuOpen = ref<Record<number, boolean>>({})
-const diffEditorRefs: Record<number, HTMLElement | null> = {}
 
 const documentTitle = computed(() => {
   if (!document.value) return ''
@@ -131,6 +76,19 @@ const entityChips = computed<{ text: string; count: number; color: 'blue' | 'red
   ]
 })
 
+// Map from entity id → entity, built from document-level and all chunks
+const entityById = computed<Map<number, Entity>>(() => {
+  const map = new Map<number, Entity>()
+  for (const e of document.value?.entities ?? []) {
+    map.set(e.id, e)
+  }
+  for (const chunk of document.value?.chunks ?? []) {
+    for (const e of chunk.entities) {
+      map.set(e.id, e)
+    }
+  }
+  return map
+})
 
 function renderChunk(chunk: Chunk): string {
   const entities = chunk.entities
@@ -158,304 +116,7 @@ function renderChunk(chunk: Chunk): string {
   return marked(content) as string
 }
 
-function initTranslations() {
-  if (!document.value) return
-  for (const chunk of document.value.chunks) {
-    if (!(chunk.id in translations.value)) {
-      translations.value[chunk.id] = chunk.translation ?? ''
-      currentDraftIndices.value[chunk.id] = chunk.availableTranslationDrafts.length || 1
-    }
-  }
-}
-
-async function saveTranslation(chunkId: number) {
-  saveStatus.value[chunkId] = 'saving'
-  try {
-    const res = await fetch(`/api/library/chunk/${chunkId}/translation`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ content: translations.value[chunkId] }),
-    })
-    if (res.status === 401) {
-      delete saveStatus.value[chunkId]
-      return
-    }
-    if (!res.ok) throw new Error(`HTTP ${res.status}`)
-    const data = await res.json() as { draftNumber: number; translator: string; dateLastModified: string; created: boolean }
-
-    const chunk = document.value?.chunks.find(c => c.id === chunkId)
-    if (chunk) {
-      chunk.translationTranslator = data.translator
-      chunk.translationDateLastModified = data.dateLastModified
-      if (data.created) {
-        chunk.availableTranslationDrafts.push(data.draftNumber)
-        currentDraftIndices.value[chunkId] = chunk.availableTranslationDrafts.length
-      }
-    }
-    computeOverview()
-
-    saveStatus.value[chunkId] = 'saved'
-    setTimeout(() => {
-      if (saveStatus.value[chunkId] === 'saved') delete saveStatus.value[chunkId]
-    }, 2000)
-  } catch {
-    saveStatus.value[chunkId] = 'error'
-  }
-}
-
-function scheduleSave(chunkId: number) {
-  if (compareState.value[chunkId]) return
-  if (saveTimers.value[chunkId]) clearTimeout(saveTimers.value[chunkId])
-  delete saveStatus.value[chunkId]
-  saveTimers.value[chunkId] = setTimeout(() => {
-    delete saveTimers.value[chunkId]
-    saveTranslation(chunkId)
-  }, 3000)
-}
-
-async function loadDraft(chunk: Chunk, draftIndex: number) {
-  if (saveTimers.value[chunk.id]) {
-    clearTimeout(saveTimers.value[chunk.id])
-    delete saveTimers.value[chunk.id]
-  }
-  delete compareState.value[chunk.id]
-  const draftNumber = chunk.availableTranslationDrafts[draftIndex - 1]
-  if (draftNumber === undefined) return
-  const res = await fetch(`/api/library/chunk/${chunk.id}/translation?draft=${draftNumber}`)
-  if (!res.ok) return
-  const data = await res.json() as { content: string }
-  translations.value[chunk.id] = data.content
-  currentDraftIndices.value[chunk.id] = draftIndex
-}
-
-function buildDiffHtml(oldText: string, newText: string): { oldHtml: string; newHtml: string } {
-  const changes = diffWords(oldText, newText)
-  let oldHtml = ''
-  let newHtml = ''
-  for (const change of changes) {
-    const esc = change.value
-      .replace(/&/g, '&amp;')
-      .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;')
-    if (change.removed) {
-      oldHtml += `<span class="diff-removed">${esc}</span>`
-    } else if (change.added) {
-      newHtml += `<span class="diff-added">${esc}</span>`
-    } else {
-      oldHtml += esc
-      newHtml += esc
-    }
-  }
-  return { oldHtml, newHtml }
-}
-
-async function startCompare(chunk: Chunk, draftIndex: number) {
-  const draftNumber = chunk.availableTranslationDrafts[draftIndex - 1]
-  if (draftNumber === undefined) return
-  const res = await fetch(`/api/library/chunk/${chunk.id}/translation?draft=${draftNumber}`)
-  if (!res.ok) return
-  const data = await res.json() as { content: string }
-  const { oldHtml, newHtml } = buildDiffHtml(data.content, translations.value[chunk.id] ?? '')
-  compareState.value[chunk.id] = { draftIndex, oldHtml }
-  draftMenuOpen.value[chunk.id] = false
-  await nextTick()
-  const el = diffEditorRefs[chunk.id]
-  if (el) el.innerHTML = newHtml
-}
-
-function exitCompare(chunkId: number) {
-  const el = diffEditorRefs[chunkId]
-  if (el) translations.value[chunkId] = el.textContent ?? ''
-  delete compareState.value[chunkId]
-}
-
-function onDiffInput(chunkId: number, event: Event) {
-  translations.value[chunkId] = (event.target as HTMLElement).textContent ?? ''
-  scheduleSave(chunkId)
-}
-
-function toggleTranslationMode() {
-  translationMode.value = !translationMode.value
-  if (translationMode.value) {
-    initTranslations()
-  }
-}
-
-async function fetchDocument() {
-  const id = route.params.id
-  if (!id) {
-    error.value = 'No document ID provided'
-    return
-  }
-
-  loading.value = true
-  error.value = null
-
-  try {
-    const response = await fetch(`/api/library/document/${id}`)
-    if (!response.ok) {
-      const data = await response.json()
-      throw new Error(data.error || 'Failed to fetch document')
-    }
-    document.value = await response.json()
-    if (translationMode.value) {
-      await nextTick()
-      computeOverview()
-    }
-  } catch (err) {
-    error.value = err instanceof Error ? err.message : 'Failed to load document'
-  } finally {
-    loading.value = false
-  }
-}
-
-// ── Entity highlighting ───────────────────────────────────────────────────────
-
-const activeEntityId   = ref<number | null>(null)
-const activeEntityText = ref<string | null>(null)
-const activeParentId   = ref<number | null>(null)
-
-// Map from entity id → entity, built from document-level and all chunks
-const entityById = computed<Map<number, Entity>>(() => {
-  const map = new Map<number, Entity>()
-  for (const e of document.value?.entities ?? []) {
-    map.set(e.id, e)
-  }
-  for (const chunk of document.value?.chunks ?? []) {
-    for (const e of chunk.entities) {
-      map.set(e.id, e)
-    }
-  }
-  return map
-})
-
-function applyEntityHighlights() {
-  window.document.querySelectorAll<HTMLElement>('.entity-underline').forEach((el) => {
-    const id = Number(el.dataset.entityId)
-    let primary = false
-    let solo = false
-
-    if (activeParentId.value != null) {
-      // Has a document-level parent: highlight all siblings sharing that parent
-      const entity = entityById.value.get(id)
-      primary = entity?.parentId === activeParentId.value
-    } else if (activeEntityText.value != null) {
-      // No parent: highlight exact text matches with reddish style
-      solo = el.textContent?.trim() === activeEntityText.value
-    }
-
-    el.classList.toggle('entity-underline--highlighted', primary)
-    el.classList.toggle('entity-underline--highlighted-solo', solo)
-  })
-}
-
-// ── Selection toolbar & inline dictionary lookup ──────────────────────────────
-
-interface DictEntry {
-  id: number
-  traditional: string
-  simplified: string
-  pinyin: string
-  definitions: string[]
-}
-
-const TONE_MARKS: Record<string, string[]> = {
-  a: ['ā', 'á', 'ǎ', 'à', 'a'], e: ['ē', 'é', 'ě', 'è', 'e'],
-  i: ['ī', 'í', 'ǐ', 'ì', 'i'], o: ['ō', 'ó', 'ǒ', 'ò', 'o'],
-  u: ['ū', 'ú', 'ǔ', 'ù', 'u'], ü: ['ǖ', 'ǘ', 'ǚ', 'ǜ', 'ü'],
-}
-
-function pinyinToMarked(pinyin: string): string {
-  return pinyin.split(' ').map((syl) => {
-    const m = syl.match(/^(.+?)([1-5])$/)
-    if (!m) return syl
-    const [, s, t] = m
-    const ti = parseInt(t) - 1
-    const base = s.replace(/v/g, 'ü')
-    if (ti === 4) return base
-    if (/[ae]/.test(base)) return base.replace(/[ae]/, (c) => TONE_MARKS[c][ti])
-    if (base.includes('ou')) return base.replace('o', TONE_MARKS['o'][ti])
-    const mv = base.match(/[iuüaeo](?=[^iuüaeo]*$)/)
-    if (mv && mv.index !== undefined)
-      return base.slice(0, mv.index) + TONE_MARKS[base[mv.index]][ti] + base.slice(mv.index + 1)
-    return base
-  }).join(' ')
-}
-
-// Toolbar state
-const toolbarRef = ref<HTMLElement | null>(null)
-const toolbar = ref({
-  show:           false,
-  x:              0,   // fixed left of popup (px)
-  y:              0,   // fixed top of popup (px)
-  text:           '',
-  mode:           'actions' as 'actions' | 'dictionary' | 'entity' | 'entity-pref' | 'entity-create',
-  results:        [] as DictEntry[],
-  loading:        false,
-  error:          null as string | null,
-  chunkId:              null as number | null,
-  explanation:          null as string | null,
-  explainLoading:       false,
-  disambiguateLoading:  false,
-  disambiguatedEntryId: null as number | null,
-  entitySummaryLoading: false as boolean,
-  entitySummary:        null as string | null,
-  prefTransInput:       '',
-  prefTransLoading:     false,
-  prefTransQueued:      null as number | null,
-  createEntityTypes:    [] as string[],
-  createEntityType:     '',
-  createEntityLoading:  false,
-})
-
-const POPUP_W = 320
-
-// x/y are the raw selection midpoint (viewport coords) until the user drags,
-// at which point they become the popup's direct left/top.
-const toolbarDragged = ref(false)
-
-const toolbarStyle = computed(() => {
-  if (toolbarDragged.value) {
-    return { left: `${toolbar.value.x}px`, top: `${toolbar.value.y}px` }
-  }
-  // Natural placement: centered above the selection via transform.
-  const cx = Math.max(4, Math.min(toolbar.value.x, window.innerWidth - 4))
-  return {
-    left:      `${cx}px`,
-    top:       `${toolbar.value.y}px`,
-    transform: 'translate(-50%, calc(-100% - 6px))',
-  }
-})
-
-// Height of the fixed app bar — read from the DOM so it stays correct if
-// Vuetify ever changes its default or the bar is resized.
-function appBarHeight(): number {
-  const bar = window.document.querySelector('.v-app-bar')
-  return bar ? bar.getBoundingClientRect().height : 64
-}
-
-// Clamp the popup so it stays fully within the viewport and below the app bar.
-function clampToViewport() {
-  const el = toolbarRef.value
-  if (!el) return
-  const rect = el.getBoundingClientRect()
-  // Switch to direct coords so adjustments move the popup predictably.
-  if (!toolbarDragged.value) {
-    toolbarDragged.value = true
-    toolbar.value.x = rect.left
-    toolbar.value.y = rect.top
-  }
-  const margin = 8
-  const topMin = appBarHeight() + margin
-  if (rect.right > window.innerWidth - margin)
-    toolbar.value.x -= rect.right - (window.innerWidth - margin)
-  if (rect.left < margin)
-    toolbar.value.x += margin - rect.left
-  if (rect.bottom > window.innerHeight - margin)
-    toolbar.value.y -= rect.bottom - (window.innerHeight - margin)
-  if (rect.top < topMin)
-    toolbar.value.y += topMin - rect.top
-}
+// ── Scrollbar overview ────────────────────────────────────────────────────────
 
 function resolveThemeColor(varName: string): string {
   const raw = getComputedStyle(window.document.documentElement).getPropertyValue(varName).trim()
@@ -491,6 +152,74 @@ function updateScrollbarStyle(segments: Array<{ topPct: number; bottomPct: numbe
     '::-webkit-scrollbar-thumb { background: rgba(100,100,100,0.9); border-radius: 6px; border: 2px solid rgba(255,255,255,0.35); }',
     '::-webkit-scrollbar-thumb:hover { background: rgba(60,60,60,0.95); border-radius: 6px; border: 2px solid rgba(255,255,255,0.35); }',
   ].join('\n')
+}
+
+// ── Composables ───────────────────────────────────────────────────────────────
+
+const {
+  translationMode,
+  translations,
+  currentDraftIndices,
+  focusedChunkId,
+  saveStatus,
+  compareState,
+  draftMenuOpen,
+  diffEditorRefs,
+  toggleTranslationMode,
+  scheduleSave,
+  loadDraft,
+  startCompare,
+  exitCompare,
+  onDiffInput,
+} = useTranslation(document, computeOverview)
+
+const {
+  toolbar,
+  toolbarRef,
+  toolbarStyle,
+  activeEntityId,
+  onHeaderPointerDown,
+  onContentMouseUp,
+  onContentClick,
+  onContentDblClick,
+  lookupInDictionary,
+  explainInContext,
+  disambiguate,
+  summarizeEntity,
+  openPrefTranslation,
+  setPreferredTranslation,
+  openEntityCreate,
+  createEntity,
+} = useSelectionToolbar(document, entityById, fetchDocument)
+
+// ── Document fetch ────────────────────────────────────────────────────────────
+
+async function fetchDocument() {
+  const id = route.params.id
+  if (!id) {
+    error.value = 'No document ID provided'
+    return
+  }
+
+  loading.value = true
+  error.value = null
+
+  try {
+    const response = await fetch(`/api/library/document/${id}`)
+    if (!response.ok) {
+      const data = await response.json()
+      throw new Error(data.error || 'Failed to fetch document')
+    }
+    document.value = await response.json()
+    if (translationMode.value) {
+      await nextTick()
+      computeOverview()
+    }
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : 'Failed to load document'
+  } finally {
+    loading.value = false
+  }
 }
 
 function computeOverview() {
@@ -533,331 +262,13 @@ watch(translationMode, async (val) => {
   }
 })
 
-// Re-clamp whenever the explanation or entity summary loads (popup height grows).
-watch(() => toolbar.value.explanation, async (val) => {
-  if (!val) return
-  await nextTick()
-  clampToViewport()
-})
-watch(() => toolbar.value.entitySummary, async (val) => {
-  if (!val) return
-  await nextTick()
-  clampToViewport()
-})
-
-// ── Drag ─────────────────────────────────────────────────────────────────────
-
-const drag = { active: false, startMouseX: 0, startMouseY: 0, startLeft: 0, startTop: 0 }
-
-function onHeaderPointerDown(e: PointerEvent) {
-  if (e.button !== 0) return
-  e.preventDefault()
-  const el = toolbarRef.value
-  if (!el) return
-  const rect = el.getBoundingClientRect()
-  // Switch to direct absolute positioning before drag begins.
-  toolbarDragged.value = true
-  toolbar.value.x = rect.left
-  toolbar.value.y = rect.top
-  drag.active      = true
-  drag.startMouseX = e.clientX
-  drag.startMouseY = e.clientY
-  drag.startLeft   = rect.left
-  drag.startTop    = rect.top
-  window.addEventListener('pointermove', onDragMove)
-  window.addEventListener('pointerup',   onDragEnd, { once: true })
-}
-
-function onDragMove(e: PointerEvent) {
-  if (!drag.active) return
-  toolbar.value.x = Math.max(8, Math.min(
-    drag.startLeft + e.clientX - drag.startMouseX,
-    window.innerWidth - POPUP_W - 8,
-  ))
-  toolbar.value.y = Math.max(8, drag.startTop + e.clientY - drag.startMouseY)
-}
-
-function onDragEnd() {
-  drag.active = false
-  window.removeEventListener('pointermove', onDragMove)
-}
-
-function onContentDblClick(e: MouseEvent) {
-  const target = (e.target as Element).closest('.entity-underline')
-  if (!target) return
-  const sel = window.getSelection()
-  if (!sel) return
-  const range = window.document.createRange()
-  range.selectNodeContents(target)
-  sel.removeAllRanges()
-  sel.addRange(range)
-  const clickedId        = Number((target as HTMLElement).dataset.entityId) || null
-  activeEntityId.value   = clickedId
-  activeEntityText.value = target.textContent?.trim() ?? null
-  activeParentId.value   = clickedId != null ? (entityById.value.get(clickedId)?.parentId ?? null) : null
-  applyEntityHighlights()
-}
-
-function onContentMouseUp() {
-  // Defer until after dblclick fires. On a double-click the event order is
-  // mouseup → dblclick, so a setTimeout(0) lets onContentDblClick correct the
-  // selection to the full entity span before we read it here.
-  setTimeout(() => {
-  const sel = window.getSelection()
-  if (!sel || sel.isCollapsed || !sel.toString().trim()) return
-
-  const node = sel.getRangeAt(0).startContainer
-  const anchorEl = node.nodeType === Node.TEXT_NODE ? node.parentElement : node as Element
-  if (anchorEl?.closest('.translation-chunk-input')) return
-
-  const text = sel.toString().trim()
-  const selRect = sel.getRangeAt(0).getBoundingClientRect()
-
-  const el = anchorEl?.closest('[data-chunk-id]')
-  const chunkId = el ? Number(el.getAttribute('data-chunk-id')) : null
-
-  // Store raw selection midpoint; transform handles centering/placement above.
-  const x = selRect.left + selRect.width / 2
-  const y = selRect.top
-
-  toolbarDragged.value = false
-  toolbar.value = {
-    show: true, x, y, text,
-    mode: 'actions', results: [], loading: false, error: null,
-    chunkId, explanation: null, explainLoading: false,
-    disambiguateLoading: false, disambiguatedEntryId: null,
-    entitySummaryLoading: false, entitySummary: null,
-    prefTransInput: '', prefTransLoading: false, prefTransQueued: null,
-    createEntityTypes: [], createEntityType: '', createEntityLoading: false,
-  }
-  }, 0)
-}
-
-function onDocumentMouseDown(e: MouseEvent) {
-  if (toolbarRef.value?.contains(e.target as Node)) return
-  if ((e.target as Element).closest?.('.entity-underline')) return  // onContentClick handles this
-  if ((e.target as Element).closest?.('.v-overlay')) return         // Vuetify menus/selects
-  toolbar.value.show = false
-  activeEntityId.value   = null
-  activeEntityText.value = null
-  activeParentId.value   = null
-  applyEntityHighlights()
-}
-
-function onContentClick(e: MouseEvent) {
-  const target = (e.target as Element).closest('.entity-underline')
-  if (!target) return
-  const entityId = Number((target as HTMLElement).dataset.entityId) || null
-  activeEntityId.value   = entityId
-  activeEntityText.value = target.textContent?.trim() ?? null
-  activeParentId.value   = entityId != null ? (entityById.value.get(entityId)?.parentId ?? null) : null
-  applyEntityHighlights()
-  const chunkEl = target.closest('[data-chunk-id]')
-  const chunkId = chunkEl ? Number(chunkEl.getAttribute('data-chunk-id')) : null
-  const rect = target.getBoundingClientRect()
-  toolbarDragged.value = false
-  toolbar.value = {
-    show: true,
-    x: rect.left + rect.width / 2,
-    y: rect.top,
-    text: activeEntityText.value ?? '',
-    mode: 'actions', results: [], loading: false, error: null,
-    chunkId, explanation: null, explainLoading: false,
-    disambiguateLoading: false, disambiguatedEntryId: null,
-    entitySummaryLoading: false, entitySummary: null,
-    prefTransInput: '', prefTransLoading: false, prefTransQueued: null,
-    createEntityTypes: [], createEntityType: '', createEntityLoading: false,
-  }
-}
-
-async function lookupInDictionary() {
-  toolbar.value.mode = 'dictionary'
-  toolbar.value.loading = true
-  toolbar.value.error = null
-  toolbar.value.results = []
-  toolbar.value.explanation = null
-  toolbar.value.explainLoading = false
-  toolbar.value.disambiguateLoading = false
-  toolbar.value.disambiguatedEntryId = null
-  try {
-    const res = await fetch(`/api/dictionary/search?q=${encodeURIComponent(toolbar.value.text)}&headwords=1`)
-    if (!res.ok) throw new Error(`HTTP ${res.status}`)
-    const data = await res.json() as { results: DictEntry[] }
-    toolbar.value.results = data.results
-  } catch (e) {
-    toolbar.value.error = e instanceof Error ? e.message : 'Lookup failed'
-  } finally {
-    toolbar.value.loading = false
-    await nextTick()
-    clampToViewport()
-  }
-}
-
-async function explainInContext() {
-  const { text, results, chunkId } = toolbar.value
-  if (!document.value || chunkId == null) return
-  toolbar.value.explainLoading = true
-  toolbar.value.error = null
-  try {
-    const res = await fetch('/api/dictionary/explain', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ term: text, entries: results, documentId: document.value.id, chunkId }),
-    })
-    if (!res.ok) throw new Error(`HTTP ${res.status}`)
-    const data = await res.json() as { explanation: string }
-    toolbar.value.explanation = data.explanation
-  } catch (e) {
-    toolbar.value.error = e instanceof Error ? e.message : 'Explain failed'
-  } finally {
-    toolbar.value.explainLoading = false
-  }
-}
-
-async function disambiguate() {
-  const { text, results, chunkId } = toolbar.value
-  if (!document.value || chunkId == null) return
-  toolbar.value.disambiguateLoading = true
-  toolbar.value.error = null
-  try {
-    const res = await fetch('/api/dictionary/disambiguate', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ term: text, entries: results, documentId: document.value.id, chunkId }),
-    })
-    if (!res.ok) throw new Error(`HTTP ${res.status}`)
-    const data = await res.json() as { explanation: string; entryId: number }
-    toolbar.value.disambiguatedEntryId = data.entryId
-    toolbar.value.explanation = data.explanation
-  } catch (e) {
-    toolbar.value.error = e instanceof Error ? e.message : 'Disambiguate failed'
-  } finally {
-    toolbar.value.disambiguateLoading = false
-  }
-}
-
-async function summarizeEntity() {
-  if (!document.value || activeEntityId.value == null) return
-  toolbarDragged.value = false  // re-center on switch
-  toolbar.value.mode = 'entity'
-  toolbar.value.entitySummaryLoading = true
-  toolbar.value.entitySummary = null
-  toolbar.value.error = null
-  try {
-    const res = await fetch('/api/knowledge/document-entity-summary', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ documentId: document.value.id, entityId: activeEntityId.value }),
-    })
-    if (!res.ok) throw new Error(`HTTP ${res.status}`)
-    const data = await res.json() as { summary: string }
-    toolbar.value.entitySummary = data.summary
-  } catch (e) {
-    toolbar.value.error = e instanceof Error ? e.message : 'Summary failed'
-  } finally {
-    toolbar.value.entitySummaryLoading = false
-  }
-}
-
-function openPrefTranslation() {
-  if (activeEntityId.value == null) return
-  const entity = entityById.value.get(activeEntityId.value)
-  const prefEntity = entity?.parentId != null ? entityById.value.get(entity.parentId) : entity
-  toolbarDragged.value = false
-  toolbar.value = {
-    ...toolbar.value,
-    mode: 'entity-pref',
-    prefTransInput: prefEntity?.preferredTranslation ?? '',
-    prefTransLoading: false,
-    prefTransQueued: null,
-    error: null,
-  }
-}
-
-async function setPreferredTranslation() {
-  if (activeEntityId.value == null || !toolbar.value.prefTransInput.trim()) return
-  toolbar.value.prefTransLoading = true
-  toolbar.value.error = null
-  toolbar.value.prefTransQueued = null
-  try {
-    const res = await fetch(`/api/knowledge/entity/${activeEntityId.value}/preferred-translation`, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ preferredTranslation: toolbar.value.prefTransInput.trim() }),
-    })
-    if (!res.ok) throw new Error(`HTTP ${res.status}`)
-    const data = await res.json() as { queued: number }
-    toolbar.value.prefTransQueued = data.queued
-  } catch (e) {
-    toolbar.value.error = e instanceof Error ? e.message : 'Save failed'
-  } finally {
-    toolbar.value.prefTransLoading = false
-  }
-}
-
-async function openEntityCreate() {
-  if (!toolbar.value.chunkId || !document.value) return
-  toolbarDragged.value = false
-  toolbar.value = {
-    ...toolbar.value,
-    mode: 'entity-create',
-    createEntityTypes: [],
-    createEntityType: '',
-    createEntityLoading: true,
-    error: null,
-  }
-  try {
-    const res = await fetch('/api/graph-types/node-type')
-    if (!res.ok) throw new Error(`HTTP ${res.status}`)
-    const data = await res.json() as Array<{ name: string }>
-    toolbar.value.createEntityTypes = data.map((t) => t.name)
-    toolbar.value.createEntityType = data[0]?.name ?? ''
-  } catch (e) {
-    toolbar.value.error = e instanceof Error ? e.message : 'Failed to load types'
-  } finally {
-    toolbar.value.createEntityLoading = false
-    await nextTick()
-    clampToViewport()
-  }
-}
-
-async function createEntity() {
-  if (!toolbar.value.chunkId || !document.value || !toolbar.value.createEntityType || !toolbar.value.text) return
-  toolbar.value.createEntityLoading = true
-  toolbar.value.error = null
-  try {
-    const res = await fetch('/api/knowledge/entity', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        text: toolbar.value.text,
-        entityType: toolbar.value.createEntityType,
-        chunkId: toolbar.value.chunkId,
-        documentId: document.value.id,
-      }),
-    })
-    if (!res.ok) throw new Error(`HTTP ${res.status}`)
-    toolbar.value.show = false
-    await fetchDocument()
-  } catch (e) {
-    toolbar.value.error = e instanceof Error ? e.message : 'Create failed'
-  } finally {
-    toolbar.value.createEntityLoading = false
-  }
-}
-
 onMounted(() => {
-  window.document.addEventListener('mousedown', onDocumentMouseDown)
   window.addEventListener('resize', computeOverview)
   fetchDocument()
 })
 
 onUnmounted(() => {
-  window.document.removeEventListener('mousedown', onDocumentMouseDown)
-  window.removeEventListener('pointermove', onDragMove)
-  window.removeEventListener('pointerup', onDragEnd)
   window.removeEventListener('resize', computeOverview)
-  for (const timer of Object.values(saveTimers.value)) clearTimeout(timer)
   gridResizeObserver?.disconnect()
   window.document.getElementById('tong-chunk-scrollbar')?.remove()
 })

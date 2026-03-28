@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, watch } from 'vue'
 import DictHeadword from '../components/DictHeadword.vue'
+import { pinyinToMarked } from '../utils/pinyin'
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -19,38 +20,6 @@ interface ParsedToken {
   raw: string
   value: string
   valid: boolean
-}
-
-// ── Pinyin conversion ────────────────────────────────────────────────────────
-
-const TONE_MARKS: Record<string, string[]> = {
-  a: ['ā', 'á', 'ǎ', 'à', 'a'],
-  e: ['ē', 'é', 'ě', 'è', 'e'],
-  i: ['ī', 'í', 'ǐ', 'ì', 'i'],
-  o: ['ō', 'ó', 'ǒ', 'ò', 'o'],
-  u: ['ū', 'ú', 'ǔ', 'ù', 'u'],
-  ü: ['ǖ', 'ǘ', 'ǚ', 'ǜ', 'ü'],
-}
-
-function syllableToMarked(syllable: string): string {
-  const m = syllable.match(/^(.+?)([1-5])$/)
-  if (!m) return syllable
-  const [, syl, toneStr] = m
-  const tone = parseInt(toneStr) - 1
-  const s = syl.replace(/v/g, 'ü')
-  if (tone === 4) return s
-  if (/[ae]/.test(s))
-    return s.replace(/[ae]/, (ch) => TONE_MARKS[ch][tone])
-  if (s.includes('ou'))
-    return s.replace('o', TONE_MARKS['o'][tone])
-  const match = s.match(/[iuüaeo](?=[^iuüaeo]*$)/)
-  if (match && match.index !== undefined)
-    return s.slice(0, match.index) + TONE_MARKS[s[match.index]][tone] + s.slice(match.index + 1)
-  return s
-}
-
-function pinyinToMarked(pinyin: string): string {
-  return pinyin.split(' ').map(syllableToMarked).join(' ')
 }
 
 // ── Query parsing ────────────────────────────────────────────────────────────
