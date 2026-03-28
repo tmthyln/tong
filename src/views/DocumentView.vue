@@ -167,6 +167,7 @@ const {
   diffEditorRefs,
   toggleTranslationMode,
   scheduleSave,
+  flushSave,
   loadDraft,
   startCompare,
   exitCompare,
@@ -366,7 +367,7 @@ onUnmounted(() => {
                   rows="3"
                   placeholder="Translation…"
                   @focus="focusedChunkId = chunk.id"
-                  @blur="focusedChunkId = null"
+                  @blur="focusedChunkId = null; flushSave(chunk.id)"
                   @input="scheduleSave(chunk.id)"
                 />
               </template>

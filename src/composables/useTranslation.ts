@@ -77,6 +77,13 @@ export function useTranslation(
     }, 3000)
   }
 
+  function flushSave(chunkId: number) {
+    if (!saveTimers.value[chunkId]) return
+    clearTimeout(saveTimers.value[chunkId])
+    delete saveTimers.value[chunkId]
+    saveTranslation(chunkId)
+  }
+
   async function loadDraft(chunk: Chunk, draftIndex: number) {
     if (saveTimers.value[chunk.id]) {
       clearTimeout(saveTimers.value[chunk.id])
@@ -160,6 +167,7 @@ export function useTranslation(
     diffEditorRefs,
     toggleTranslationMode,
     scheduleSave,
+    flushSave,
     loadDraft,
     startCompare,
     exitCompare,
