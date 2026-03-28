@@ -37,9 +37,10 @@ export function useSelectionToolbar(
     prefTransInput:       '',
     prefTransLoading:     false,
     prefTransQueued:      null as number | null,
-    createEntityTypes:    [] as string[],
-    createEntityType:     '',
-    createEntityLoading:  false,
+    createEntityTypes:        [] as string[],
+    createEntityType:         '',
+    createEntityLoading:      false,
+    selectionOverlapsEntity:  false,
   })
 
   const toolbarDragged = ref(false)
@@ -195,6 +196,10 @@ export function useSelectionToolbar(
       const el = anchorEl?.closest('[data-chunk-id]')
       const chunkId = el ? Number(el.getAttribute('data-chunk-id')) : null
 
+      const range = sel.getRangeAt(0)
+      const entitySpans = el?.querySelectorAll<HTMLElement>('.entity-underline') ?? []
+      const selectionOverlapsEntity = [...entitySpans].some(span => range.intersectsNode(span))
+
       const x = selRect.left + selRect.width / 2
       const y = selRect.top
 
@@ -207,6 +212,7 @@ export function useSelectionToolbar(
         entitySummaryLoading: false, entitySummary: null,
         prefTransInput: '', prefTransLoading: false, prefTransQueued: null,
         createEntityTypes: [], createEntityType: '', createEntityLoading: false,
+        selectionOverlapsEntity,
       }
     }, 0)
   }

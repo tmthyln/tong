@@ -490,7 +490,7 @@ onUnmounted(() => {
           Set translation
         </v-btn>
         <v-btn
-          v-if="activeEntityId == null && toolbar.chunkId != null"
+          v-if="activeEntityId == null && toolbar.chunkId != null && !toolbar.selectionOverlapsEntity"
           size="small"
           variant="text"
           prepend-icon="mdi-tag-plus-outline"
