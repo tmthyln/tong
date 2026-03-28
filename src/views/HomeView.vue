@@ -16,7 +16,7 @@ const features = [
     title: 'Lexicon',
     icon: 'mdi-format-list-bulleted-type',
     to: '/lexicon',
-    description: "Your personal vocabulary list — words you've encountered and chosen to track.",
+    description: "Your personal vocabulary list — words you've encountered and how well you've learned them.",
   },
   {
     title: 'Knowledge Graph',
