@@ -204,6 +204,8 @@ export function useSelectionToolbar(
   }
 
   function onContentClick(e: MouseEvent) {
+    const sel = window.getSelection()
+    if (sel && !sel.isCollapsed) return
     const target = (e.target as Element).closest('.entity-underline')
     if (!target) return
     const entityId = Number((target as HTMLElement).dataset.entityId) || null
