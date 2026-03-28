@@ -76,7 +76,7 @@ knowledgeRoutes.post('/document-entity-summary', async (c) => {
   const messages = [
     {
       role: 'system' as const,
-      content: 'You are a knowledge assistant for Chinese literature. Give direct, compact entity descriptions. Never use filler phrases like "In this passage", "Based on the text", "According to". Start immediately with the description.',
+      content: 'You are a knowledge assistant for Chinese literature. Give direct, compact entity descriptions in English. Never use filler phrases like "In this passage", "Based on the text", "According to". Start immediately with the description.',
     },
     {
       role: 'user' as const,

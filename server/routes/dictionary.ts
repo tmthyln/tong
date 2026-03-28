@@ -439,7 +439,7 @@ dictionaryRoutes.post('/explain', async (c) => {
   const messages = [
     {
       role: 'system' as const,
-      content: 'You are a Chinese language tutor. Give direct, compact explanations. Never use filler phrases like "In this passage", "The context suggests", "Here,", or "This word". Start immediately with the meaning or usage.',
+      content: 'You are a Chinese language tutor. Give direct, compact explanations in English. Never use filler phrases like "In this passage", "The context suggests", "Here,", or "This word". Start immediately with the meaning or usage.',
     },
     {
       role: 'user' as const,
@@ -521,7 +521,7 @@ dictionaryRoutes.post('/disambiguate', async (c) => {
   const messages = [
     {
       role: 'system' as const,
-      content: 'You are a Chinese language tutor. Give direct, compact explanations. Never use filler phrases like "In this passage", "The context suggests", "Here,", or "This word". Start immediately with the meaning or usage.',
+      content: 'You are a Chinese language tutor. Give direct, compact explanations in English. Never use filler phrases like "In this passage", "The context suggests", "Here,", or "This word". Start immediately with the meaning or usage.',
     },
     {
       role: 'user' as const,
