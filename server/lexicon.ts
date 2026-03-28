@@ -99,11 +99,29 @@ export class Lexicon extends DurableObject<Env> {
     return await this.getTerm(term)
   }
 
-  async getPreferences(): Promise<{ script: string; pronunciation: string }> {
-    return (await this.ctx.storage.get<{ script: string; pronunciation: string }>('preferences')) ?? { script: 'traditional', pronunciation: 'pinyin' }
+  async getPreferences(): Promise<{ script: string; pronunciationPrimary: string; pronunciationSecondaries: string[]; theme: string }> {
+    const stored = await this.ctx.storage.get<Record<string, unknown>>('preferences')
+    if (!stored) {
+      return { script: 'traditional', pronunciationPrimary: 'pinyin', pronunciationSecondaries: [], theme: 'light' }
+    }
+    // Migration: old format had `pronunciation` as a string
+    if (typeof stored.pronunciation === 'string') {
+      return {
+        script: (stored.script as string) ?? 'traditional',
+        pronunciationPrimary: stored.pronunciation,
+        pronunciationSecondaries: [],
+        theme: 'light',
+      }
+    }
+    return {
+      script: (stored.script as string) ?? 'traditional',
+      pronunciationPrimary: (stored.pronunciationPrimary as string) ?? 'pinyin',
+      pronunciationSecondaries: (stored.pronunciationSecondaries as string[]) ?? [],
+      theme: (stored.theme as string) ?? 'light',
+    }
   }
 
-  async setPreferences(prefs: { script?: string; pronunciation?: string }): Promise<{ script: string; pronunciation: string }> {
+  async setPreferences(prefs: { script?: string; pronunciationPrimary?: string; pronunciationSecondaries?: string[]; theme?: string }): Promise<{ script: string; pronunciationPrimary: string; pronunciationSecondaries: string[]; theme: string }> {
     const current = await this.getPreferences()
     const updated = { ...current, ...prefs }
     await this.ctx.storage.put('preferences', updated)

@@ -15,7 +15,7 @@ function getLexicon(c: Parameters<typeof getUserId>[0], env: Env) {
 
 preferencesRoutes.get('/', async (c) => {
   if (userType(getUserId(c)) === 'public') {
-    return c.json({ script: 'traditional', pronunciation: 'pinyin' })
+    return c.json({ script: 'traditional', pronunciationPrimary: 'pinyin', pronunciationSecondaries: [], theme: 'light' })
   }
   const lexicon = getLexicon(c, c.env)
   const prefs = await lexicon.getPreferences()
@@ -26,7 +26,7 @@ preferencesRoutes.patch('/', async (c) => {
   if (userType(getUserId(c)) === 'public') {
     return c.json({ error: 'Unauthorized' }, 401)
   }
-  const body = await c.req.json<{ script?: string; pronunciation?: string }>().catch(() => ({}))
+  const body = await c.req.json<{ script?: string; pronunciationPrimary?: string; pronunciationSecondaries?: string[]; theme?: string }>().catch(() => ({}))
   const lexicon = getLexicon(c, c.env)
   const updated = await lexicon.setPreferences(body)
   return c.json(updated)

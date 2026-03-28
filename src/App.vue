@@ -1,20 +1,12 @@
 <script setup lang="ts">
 import { RouterView } from 'vue-router'
 import { ref, computed, onMounted } from 'vue'
-import { useTheme } from 'vuetify'
 import { useUser } from './composables/useUser'
 import { usePreferences } from './composables/usePreferences'
+import PreferencesDialog from './components/PreferencesDialog.vue'
 
-const theme = useTheme()
 const drawer = ref(true)
-
-const isDark = computed(() => theme.global.current.value.dark)
-
-function toggleTheme() {
-  const newTheme = isDark.value ? 'light' : 'dark'
-  theme.change(newTheme)
-  localStorage.setItem('theme', newTheme)
-}
+const prefsOpen = ref(false)
 
 const { userType, displayName, expiresIn, fetchUser, login, logout, createTestAccount } = useUser()
 const { fetchPreferences } = usePreferences()
@@ -108,11 +100,10 @@ const navItems = [
         </div>
       </v-toolbar-title>
       <v-spacer />
-      <v-btn
-        :icon="isDark ? 'mdi-weather-sunny' : 'mdi-weather-night'"
-        @click="toggleTheme"
-      />
+      <v-btn icon="mdi-tune" @click="prefsOpen = true" />
     </v-app-bar>
+
+    <PreferencesDialog v-model="prefsOpen" />
 
     <v-main class="main-content">
       <RouterView />

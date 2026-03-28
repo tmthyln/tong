@@ -8,9 +8,8 @@ import { createVuetify } from 'vuetify'
 import * as components from 'vuetify/components'
 import * as directives from 'vuetify/directives'
 
-const savedTheme = localStorage.getItem('theme')
 const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches
-const defaultTheme = savedTheme || (prefersDark ? 'dark' : 'light')
+const defaultTheme = localStorage.getItem('pref:theme') || (prefersDark ? 'dark' : 'light')
 
 const vuetify = createVuetify({
   components,

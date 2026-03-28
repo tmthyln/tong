@@ -1,45 +1,55 @@
-import { ref } from 'vue'
+import { watch } from 'vue'
+import { useTheme } from 'vuetify'
+import { createSharedComposable, useLocalStorage } from '@vueuse/core'
 import { useUser } from './useUser'
 
-const script = ref<'traditional' | 'simplified'>('traditional')
-const pronunciation = ref<string>('pinyin')
+const usePreferences = createSharedComposable(() => {
+  const vTheme = useTheme()
 
-async function fetchPreferences(): Promise<void> {
-  const { userType } = useUser()
-  if (userType.value === 'public') {
-    script.value = (localStorage.getItem('pref:script') as 'traditional' | 'simplified') ?? 'traditional'
-    pronunciation.value = localStorage.getItem('pref:pronunciation') ?? 'pinyin'
-    return
-  }
-  const res = await fetch('/api/preferences')
-  const data: { script: string; pronunciation: string } = await res.json()
-  script.value = data.script as 'traditional' | 'simplified'
-  pronunciation.value = data.pronunciation
-}
-
-async function updatePreferences(patch: { script?: 'traditional' | 'simplified'; pronunciation?: string }): Promise<void> {
-  const { userType } = useUser()
-  if (userType.value === 'public') {
-    if (patch.script !== undefined) {
-      localStorage.setItem('pref:script', patch.script)
-      script.value = patch.script
-    }
-    if (patch.pronunciation !== undefined) {
-      localStorage.setItem('pref:pronunciation', patch.pronunciation)
-      pronunciation.value = patch.pronunciation
-    }
-    return
-  }
-  const res = await fetch('/api/preferences', {
-    method: 'PATCH',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(patch),
+  const script = useLocalStorage<'traditional' | 'simplified'>('pref:script', 'traditional')
+  const pronunciationPrimary = useLocalStorage('pref:pronunciationPrimary', 'pinyin')
+  const pronunciationSecondaries = useLocalStorage<string[]>('pref:pronunciationSecondaries', [])
+  const theme = useLocalStorage('pref:theme', () => {
+    return localStorage.getItem('theme')
+      ?? (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')
   })
-  const data: { script: string; pronunciation: string } = await res.json()
-  script.value = data.script as 'traditional' | 'simplified'
-  pronunciation.value = data.pronunciation
-}
 
-export function usePreferences() {
-  return { script, pronunciation, fetchPreferences, updatePreferences }
-}
+  watch(theme, val => vTheme.change(val), { immediate: true })
+
+  async function fetchPreferences(): Promise<void> {
+    if (useUser().userType.value === 'public') return
+    const data: { script: string; pronunciationPrimary: string; pronunciationSecondaries: string[]; theme: string } =
+      await fetch('/api/preferences').then(r => r.json())
+    script.value = data.script as 'traditional' | 'simplified'
+    pronunciationPrimary.value = data.pronunciationPrimary
+    pronunciationSecondaries.value = data.pronunciationSecondaries
+    theme.value = data.theme
+  }
+
+  async function updatePreferences(patch: {
+    script?: 'traditional' | 'simplified'
+    pronunciationPrimary?: string
+    pronunciationSecondaries?: string[]
+    theme?: string
+  }): Promise<void> {
+    if (patch.script !== undefined) script.value = patch.script
+    if (patch.pronunciationPrimary !== undefined) pronunciationPrimary.value = patch.pronunciationPrimary
+    if (patch.pronunciationSecondaries !== undefined) pronunciationSecondaries.value = patch.pronunciationSecondaries
+    if (patch.theme !== undefined) theme.value = patch.theme
+    if (useUser().userType.value === 'public') return
+    const data: { script: string; pronunciationPrimary: string; pronunciationSecondaries: string[]; theme: string } =
+      await fetch('/api/preferences', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(patch),
+      }).then(r => r.json())
+    script.value = data.script as 'traditional' | 'simplified'
+    pronunciationPrimary.value = data.pronunciationPrimary
+    pronunciationSecondaries.value = data.pronunciationSecondaries
+    theme.value = data.theme
+  }
+
+  return { script, pronunciationPrimary, pronunciationSecondaries, theme, fetchPreferences, updatePreferences }
+})
+
+export { usePreferences }
