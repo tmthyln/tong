@@ -1,7 +1,9 @@
-import { ref, onUnmounted, nextTick } from 'vue'
+import { ref, computed, watch, onUnmounted, nextTick } from 'vue'
 import type { Ref } from 'vue'
 import { diffWords } from 'diff'
 import type { Chunk, Document } from '../types/document'
+
+type DocumentMode = 'reading' | 'translation' | 'reader'
 
 interface CompareEntry {
   draftIndex: number
@@ -11,8 +13,9 @@ interface CompareEntry {
 export function useTranslation(
   document: Ref<Document | null>,
   computeOverview: () => void,
+  documentMode: Ref<DocumentMode>,
 ) {
-  const translationMode = ref(false)
+  const translationMode = computed(() => documentMode.value === 'translation')
   const translations = ref<Record<number, string>>({})
   const currentDraftIndices = ref<Record<number, number>>({})
   const focusedChunkId = ref<number | null>(null)
@@ -145,12 +148,9 @@ export function useTranslation(
     scheduleSave(chunkId)
   }
 
-  function toggleTranslationMode() {
-    translationMode.value = !translationMode.value
-    if (translationMode.value) {
-      initTranslations()
-    }
-  }
+  watch(translationMode, val => {
+    if (val) initTranslations()
+  })
 
   onUnmounted(() => {
     for (const timer of Object.values(saveTimers.value)) clearTimeout(timer)
@@ -165,7 +165,6 @@ export function useTranslation(
     compareState,
     draftMenuOpen,
     diffEditorRefs,
-    toggleTranslationMode,
     scheduleSave,
     flushSave,
     loadDraft,

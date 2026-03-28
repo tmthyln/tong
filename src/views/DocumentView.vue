@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted, computed, watch, nextTick } from 'vue'
 import { useRoute } from 'vue-router'
+import { useLocalStorage } from '@vueuse/core'
 import { marked } from 'marked'
 import DictHeadword from '../components/DictHeadword.vue'
 import { useUser } from '../composables/useUser'
@@ -9,8 +10,11 @@ import { useTranslation } from '../composables/useTranslation'
 import { useSelectionToolbar } from '../composables/useSelectionToolbar'
 import type { Entity, Chunk, Document } from '../types/document'
 
+type DocumentMode = 'reading' | 'translation' | 'reader'
+
 const route = useRoute()
 const { userId } = useUser()
+const documentMode = useLocalStorage<DocumentMode>('pref:documentMode', 'reading')
 const document = ref<Document | null>(null)
 const loading = ref(false)
 const error = ref<string | null>(null)
@@ -74,6 +78,26 @@ const entityChips = computed<{ text: string; count: number; color: 'blue' | 'red
     ...docItems.map(i => ({ ...i, color: 'blue' as const })),
     ...chunkItems.map(i => ({ ...i, color: 'red' as const })),
   ]
+})
+
+// Set of entity IDs that are the first occurrence of their identity key across all chunks
+const firstOccurrenceEntityIds = computed<Set<number>>(() => {
+  const doc = document.value
+  if (!doc) return new Set()
+  const seen = new Set<string>()
+  const ids = new Set<number>()
+  for (const chunk of doc.chunks) {
+    for (const entity of chunk.entities) {
+      const key = entity.parentId != null
+        ? `parent:${entity.parentId}`
+        : `orphan:${entity.extractedText}`
+      if (!seen.has(key)) {
+        seen.add(key)
+        ids.add(entity.id)
+      }
+    }
+  }
+  return ids
 })
 
 // Map from entity id → entity, built from document-level and all chunks
@@ -165,14 +189,13 @@ const {
   compareState,
   draftMenuOpen,
   diffEditorRefs,
-  toggleTranslationMode,
   scheduleSave,
   flushSave,
   loadDraft,
   startCompare,
   exitCompare,
   onDiffInput,
-} = useTranslation(document, computeOverview)
+} = useTranslation(document, computeOverview, documentMode)
 
 const {
   toolbar,
@@ -263,6 +286,13 @@ watch(translationMode, async (val) => {
   }
 })
 
+function clickAnnotation(chunkId: number, entityId: number) {
+  const chunkEl = window.document.querySelector<HTMLElement>(`[data-chunk-id="${chunkId}"]`)
+  if (!chunkEl) return
+  const span = chunkEl.querySelector<HTMLElement>(`.entity-underline[data-entity-id="${entityId}"]`)
+  span?.click()
+}
+
 onMounted(() => {
   window.addEventListener('resize', computeOverview)
   fetchDocument()
@@ -287,35 +317,29 @@ onUnmounted(() => {
       <div class="d-flex align-center mb-4">
         <v-btn icon="mdi-arrow-left" variant="text" to="/library" />
         <h1 class="text-h4 ml-2">{{ documentTitle }}</h1>
+        <v-spacer />
+        <v-btn-toggle v-model="documentMode" mandatory variant="outlined" rounded="lg">
+          <v-btn value="reading"     icon="mdi-book-open-variant"  title="Read" />
+          <v-btn value="translation" icon="mdi-translate"          title="Translate" />
+          <v-btn value="reader"      icon="mdi-card-text-outline"  title="Reader" />
+        </v-btn-toggle>
       </div>
 
-      <v-row class="mb-4" align="center">
-        <v-col>
-          <v-chip
-            v-for="(chip, i) in entityChips"
-            :key="i"
-            :color="chip.color"
-            size="small"
-            variant="tonal"
-            class="mr-1 mb-1"
-          >{{ chip.text }}<span v-if="chip.count > 1" class="ml-1 opacity-60">{{ chip.count }}</span></v-chip>
-        </v-col>
-        <v-col cols="auto">
-          <v-btn
-            :prepend-icon="translationMode ? 'mdi-file-document' : 'mdi-translate'"
-            :variant="translationMode ? 'flat' : 'outlined'"
-            :color="translationMode ? 'primary' : undefined"
-            @click="toggleTranslationMode"
-          >
-            {{ translationMode ? 'Exit Translation' : 'Translate' }}
-          </v-btn>
-        </v-col>
-      </v-row>
+      <div class="mb-4">
+        <v-chip
+          v-for="(chip, i) in entityChips"
+          :key="i"
+          :color="chip.color"
+          size="small"
+          variant="tonal"
+          class="mr-1 mb-1"
+        >{{ chip.text }}<span v-if="chip.count > 1" class="ml-1 opacity-60">{{ chip.count }}</span></v-chip>
+      </div>
 
       <!-- Reading / Translation view (unified) -->
       <div
         class="translation-layout"
-        :class="{ 'translation-layout--reading': !translationMode }"
+        :class="{ 'translation-layout--reading': documentMode === 'reading' }"
         @mouseup="onContentMouseUp"
         @dblclick="onContentDblClick"
         @click="onContentClick"
@@ -334,7 +358,7 @@ onUnmounted(() => {
               :data-chunk-id="chunk.id"
               v-html="renderChunk(chunk)"
             />
-            <div v-if="translationMode" class="translation-chunk-input">
+            <div v-if="documentMode === 'translation'" class="translation-chunk-input">
               <!-- Compare mode: side-by-side diff -->
               <template v-if="compareState[chunk.id]">
                 <div class="diff-view">
@@ -409,6 +433,23 @@ onUnmounted(() => {
                   of {{ chunk.availableTranslationDrafts.length }}
                 </div>
               </div>
+            </div>
+            <div v-else-if="documentMode === 'reader'" class="reader-chunk-annotation">
+              <template v-if="chunk.entities.some(e => firstOccurrenceEntityIds.has(e.id))">
+                <div
+                  v-for="entity in chunk.entities.filter(e => firstOccurrenceEntityIds.has(e.id))"
+                  :key="entity.id"
+                  class="reader-annotation-item"
+                  :data-entity-id="entity.id"
+                  @click="clickAnnotation(chunk.id, entity.id)"
+                >
+                  <span class="reader-annotation-text">{{ entity.extractedText }}</span>
+                  <span v-if="entity.label || entity.preferredTranslation" class="reader-annotation-label">
+                    {{ entity.preferredTranslation || entity.label }}
+                  </span>
+                  <span class="reader-annotation-type">{{ entity.entityType }}</span>
+                </div>
+              </template>
             </div>
           </template>
         </div>
@@ -895,6 +936,47 @@ onUnmounted(() => {
   background: rgba(var(--v-theme-error), 0.25);
   outline: 1px solid rgba(var(--v-theme-error), 0.5);
   border-radius: 2px;
+}
+
+.reader-chunk-annotation {
+  padding: 8px 0 8px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  align-self: start;
+}
+
+.reader-annotation-item {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  cursor: pointer;
+  padding: 3px 6px;
+  border-radius: 4px;
+  border-left: 2px solid rgba(var(--v-border-color), var(--v-border-opacity));
+  font-size: 0.9rem;
+}
+
+.reader-annotation-item:hover {
+  background: rgba(var(--v-theme-primary), 0.06);
+  border-left-color: rgb(var(--v-theme-primary));
+}
+
+.reader-annotation-text {
+  font-weight: 500;
+}
+
+.reader-annotation-label {
+  color: rgba(var(--v-theme-on-surface), 0.7);
+  font-size: 0.85rem;
+}
+
+.reader-annotation-type {
+  color: rgba(var(--v-theme-on-surface), 0.4);
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-left: auto;
 }
 
 </style>
