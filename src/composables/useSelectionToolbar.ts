@@ -242,6 +242,7 @@ export function useSelectionToolbar(
       entitySummaryLoading: false, entitySummary: null,
       prefTransInput: '', prefTransLoading: false, prefTransQueued: null,
       createEntityTypes: [], createEntityType: '', createEntityLoading: false,
+      selectionOverlapsEntity: false,
     }
   }
 
