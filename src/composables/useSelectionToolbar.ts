@@ -52,7 +52,9 @@ export function useSelectionToolbar(
     if (toolbarDragged.value) {
       return { left: `${toolbar.value.x}px`, top: `${toolbar.value.y}px` }
     }
-    const cx = Math.max(4, Math.min(toolbar.value.x, window.innerWidth - 4))
+    const halfW = POPUP_W / 2
+    const leftMin = navDrawerRight() + halfW + 4
+    const cx = Math.max(leftMin, Math.min(toolbar.value.x, window.innerWidth - halfW - 4))
     return {
       left:      `${cx}px`,
       top:       `${toolbar.value.y}px`,
@@ -63,6 +65,11 @@ export function useSelectionToolbar(
   function appBarHeight(): number {
     const bar = window.document.querySelector('.v-app-bar')
     return bar ? bar.getBoundingClientRect().height : 64
+  }
+
+  function navDrawerRight(): number {
+    const drawer = window.document.querySelector('.v-navigation-drawer')
+    return drawer ? drawer.getBoundingClientRect().right : 0
   }
 
   function clampToViewport() {
@@ -76,10 +83,11 @@ export function useSelectionToolbar(
     }
     const margin = 8
     const topMin = appBarHeight() + margin
+    const leftMin = navDrawerRight() + margin
     if (rect.right > window.innerWidth - margin)
       toolbar.value.x -= rect.right - (window.innerWidth - margin)
-    if (rect.left < margin)
-      toolbar.value.x += margin - rect.left
+    if (rect.left < leftMin)
+      toolbar.value.x += leftMin - rect.left
     if (rect.bottom > window.innerHeight - margin)
       toolbar.value.y -= rect.bottom - (window.innerHeight - margin)
     if (rect.top < topMin)
