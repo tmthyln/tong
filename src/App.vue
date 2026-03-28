@@ -26,6 +26,9 @@ onMounted(() => {
   fetchPreferences()
 })
 
+const version = __APP_VERSION__
+const buildDate = __BUILD_DATE__
+
 const navItems = [
   { title: 'Home', icon: 'mdi-home', to: '/' },
   { title: 'Document', icon: 'mdi-file-document-outline', to: '/document' },
@@ -89,6 +92,13 @@ const navItems = [
           :to="item.to"
         />
       </v-list>
+
+      <template #append>
+        <div class="px-4 pb-3 text-caption text-medium-emphasis version-label">
+          <div>Tong Version {{ version }}</div>
+          <div>{{ buildDate }}</div>
+        </div>
+      </template>
     </v-navigation-drawer>
 
     <v-app-bar>
@@ -118,5 +128,14 @@ const navItems = [
 
 .main-content > * {
   width: 100%;
+}
+
+.version-label {
+  display: none;
+}
+
+.v-navigation-drawer--is-hovering .version-label,
+.v-navigation-drawer:not(.v-navigation-drawer--rail) .version-label {
+  display: block;
 }
 </style>

@@ -5,9 +5,14 @@ import vue from '@vitejs/plugin-vue'
 import vueDevTools from 'vite-plugin-vue-devtools'
 
 import { cloudflare } from "@cloudflare/vite-plugin"
+import pkg from './package.json'
 
 // https://vite.dev/config/
 export default defineConfig({
+	define: {
+		__APP_VERSION__: JSON.stringify(pkg.version),
+		__BUILD_DATE__: JSON.stringify(new Date().toISOString().slice(0, 10)),
+	},
 	plugins: [
 		vue(),
 		vueDevTools(),
