@@ -169,6 +169,46 @@ knowledgeRoutes.patch('/entity/:id/preferred-translation', async (c) => {
   return c.json({ queued: chunkIds.length })
 })
 
+// DELETE /api/knowledge/entity/:id
+//
+// Deletes the entity and its document-scoped parent (if any), plus all child
+// chunk entities and related relationships.
+knowledgeRoutes.delete('/entity/:id', async (c) => {
+  if (userType(getUserId(c)) === 'public') {
+    return c.json({ error: 'Unauthorized' }, 401)
+  }
+
+  const entityId = parseInt(c.req.param('id'), 10)
+
+  const entity = await c.env.DB
+    .prepare('SELECT id, parent_id FROM extracted_entity WHERE id = ?')
+    .bind(entityId)
+    .first<{ id: number; parent_id: number | null }>()
+
+  if (!entity) return c.json({ error: 'Entity not found' }, 404)
+
+  const rootId = entity.parent_id ?? entity.id
+
+  await c.env.DB.batch([
+    c.env.DB
+      .prepare(
+        `DELETE FROM extracted_relationship
+         WHERE from_entity_id = ?1 OR to_entity_id = ?1
+            OR from_entity_id IN (SELECT id FROM extracted_entity WHERE parent_id = ?1)
+            OR to_entity_id   IN (SELECT id FROM extracted_entity WHERE parent_id = ?1)`
+      )
+      .bind(rootId),
+    c.env.DB
+      .prepare('DELETE FROM extracted_entity WHERE parent_id = ?')
+      .bind(rootId),
+    c.env.DB
+      .prepare('DELETE FROM extracted_entity WHERE id = ?')
+      .bind(rootId),
+  ])
+
+  return new Response(null, { status: 204 })
+})
+
 // POST /api/knowledge/entity
 //
 // Manually create a chunk-scoped entity from selected text.

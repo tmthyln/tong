@@ -399,6 +399,24 @@ export function useSelectionToolbar(
     }
   }
 
+  async function deleteEntity() {
+    if (activeEntityId.value == null) return
+    toolbar.value.loading = true
+    toolbar.value.error = null
+    try {
+      const res = await fetch(`/api/knowledge/entity/${activeEntityId.value}`, {
+        method: 'DELETE',
+      })
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      toolbar.value.show = false
+      await onEntityCreated()
+    } catch (e) {
+      toolbar.value.error = e instanceof Error ? e.message : 'Delete failed'
+    } finally {
+      toolbar.value.loading = false
+    }
+  }
+
   async function createEntity() {
     if (!toolbar.value.chunkId || !document.value || !toolbar.value.createEntityType || !toolbar.value.text) return
     toolbar.value.createEntityLoading = true
@@ -465,5 +483,6 @@ export function useSelectionToolbar(
     setPreferredTranslation,
     openEntityCreate,
     createEntity,
+    deleteEntity,
   }
 }

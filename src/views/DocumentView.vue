@@ -214,6 +214,7 @@ const {
   setPreferredTranslation,
   openEntityCreate,
   createEntity,
+  deleteEntity,
 } = useSelectionToolbar(document, entityById, fetchDocument)
 
 // ── Document fetch ────────────────────────────────────────────────────────────
@@ -497,6 +498,17 @@ onUnmounted(() => {
           @click="openEntityCreate"
         >
           Create entity
+        </v-btn>
+        <v-btn
+          v-if="activeEntityId != null"
+          size="small"
+          variant="text"
+          color="error"
+          prepend-icon="mdi-delete-outline"
+          :loading="toolbar.loading"
+          @click="deleteEntity"
+        >
+          Delete entity
         </v-btn>
       </v-card>
 
