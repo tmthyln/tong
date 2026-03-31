@@ -51,11 +51,13 @@ export class RefreshCharIdsWorkflow extends WorkflowEntrypoint<Env, RefreshCharI
       }
     )
 
-    // Step 2: Clear all existing IDS data.
+    // Step 2: Clear all existing IDS data atomically.
     await step.do('clear-existing', async () => {
-      await this.env.DB.prepare(`DELETE FROM char_ids_node_link`).run()
-      await this.env.DB.prepare(`DELETE FROM char_ids_node`).run()
-      await this.env.DB.prepare(`DELETE FROM char_ids`).run()
+      await this.env.DB.batch([
+        this.env.DB.prepare(`DELETE FROM char_ids_node_link`),
+        this.env.DB.prepare(`DELETE FROM char_ids_node`),
+        this.env.DB.prepare(`DELETE FROM char_ids`),
+      ])
     })
 
     // Steps 3..N: Create nodes for each chunk.
