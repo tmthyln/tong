@@ -197,11 +197,11 @@ interface CharIdsRefreshJob {
 
 const charIdsRefreshJob = ref<CharIdsRefreshJob | null>(null)
 const charIdsRefreshStarting = ref(false)
-let charIdsPollTimer: ReturnType<typeof setInterval> | null = null
+let charIdsPollTimer: ReturnType<typeof setTimeout> | null = null
 
 function stopCharIdsPolling() {
   if (charIdsPollTimer) {
-    clearInterval(charIdsPollTimer)
+    clearTimeout(charIdsPollTimer)
     charIdsPollTimer = null
   }
 }
@@ -212,6 +212,13 @@ async function pollCharIdsJob(jobId: string) {
   const job = await res.json() as CharIdsRefreshJob
   charIdsRefreshJob.value = job
   if (job.status !== 'running') stopCharIdsPolling()
+}
+
+function scheduleCharIdsPoll(jobId: string) {
+  charIdsPollTimer = setTimeout(async () => {
+    await pollCharIdsJob(jobId)
+    if (charIdsPollTimer !== null) scheduleCharIdsPoll(jobId)
+  }, 2000)
 }
 
 async function startCharIdsRefresh() {
@@ -231,7 +238,7 @@ async function startCharIdsRefresh() {
       error: null,
     }
     stopCharIdsPolling()
-    charIdsPollTimer = setInterval(() => pollCharIdsJob(jobId), 2000)
+    scheduleCharIdsPoll(jobId)
   } finally {
     charIdsRefreshStarting.value = false
   }
