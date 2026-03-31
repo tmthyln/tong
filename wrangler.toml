@@ -51,6 +51,11 @@ name = "refresh-cedict"
 binding = "REFRESH_CEDICT_WORKFLOW"
 class_name = "RefreshCedictWorkflow"
 
+[[workflows]]
+name = "refresh-char-ids"
+binding = "REFRESH_CHAR_IDS_WORKFLOW"
+class_name = "RefreshCharIdsWorkflow"
+
 [[vectorize]]
 binding = "CHUNK_VECTORS"
 index_name = "tong-doc-chunks"

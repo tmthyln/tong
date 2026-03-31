@@ -184,6 +184,59 @@ async function executeDelete() {
 
 // ── Dictionary Refresh ───────────────────────────────────────
 
+interface CharIdsRefreshJob {
+  jobId: string
+  status: 'running' | 'completed' | 'failed'
+  totalChars: number | null
+  processedChars: number
+  percent: number | null
+  startedAt: string
+  completedAt: string | null
+  error: string | null
+}
+
+const charIdsRefreshJob = ref<CharIdsRefreshJob | null>(null)
+const charIdsRefreshStarting = ref(false)
+let charIdsPollTimer: ReturnType<typeof setInterval> | null = null
+
+function stopCharIdsPolling() {
+  if (charIdsPollTimer) {
+    clearInterval(charIdsPollTimer)
+    charIdsPollTimer = null
+  }
+}
+
+async function pollCharIdsJob(jobId: string) {
+  const res = await fetch(`/api/dictionary/components/refresh/${jobId}`)
+  if (!res.ok) return
+  const job = await res.json() as CharIdsRefreshJob
+  charIdsRefreshJob.value = job
+  if (job.status !== 'running') stopCharIdsPolling()
+}
+
+async function startCharIdsRefresh() {
+  charIdsRefreshStarting.value = true
+  try {
+    const res = await fetch('/api/dictionary/components/refresh', { method: 'POST' })
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    const { jobId } = await res.json() as { jobId: string }
+    charIdsRefreshJob.value = {
+      jobId,
+      status: 'running',
+      totalChars: null,
+      processedChars: 0,
+      percent: null,
+      startedAt: new Date().toISOString(),
+      completedAt: null,
+      error: null,
+    }
+    stopCharIdsPolling()
+    charIdsPollTimer = setInterval(() => pollCharIdsJob(jobId), 2000)
+  } finally {
+    charIdsRefreshStarting.value = false
+  }
+}
+
 interface RefreshJob {
   jobId: string
   status: 'running' | 'completed' | 'failed'
@@ -238,7 +291,10 @@ async function startRefresh() {
 }
 
 onMounted(fetchAll)
-onUnmounted(stopPolling)
+onUnmounted(() => {
+  stopPolling()
+  stopCharIdsPolling()
+})
 </script>
 
 <template>
@@ -470,6 +526,81 @@ onUnmounted(stopPolling)
             icon="mdi-alert-circle-outline"
           >
             <span class="text-body-2">{{ refreshJob.error ?? 'Refresh failed.' }}</span>
+          </v-alert>
+        </template>
+      </v-card-text>
+    </v-card>
+
+    <!-- Character Structure -->
+    <h2 class="text-h5 mb-3">Character Structure</h2>
+    <v-card variant="outlined" class="mb-8">
+      <v-card-text>
+        <div class="d-flex align-start justify-space-between ga-4 flex-wrap">
+          <div>
+            <div class="text-body-1 font-weight-medium mb-1">IDS Refresh</div>
+            <div class="text-body-2 text-medium-emphasis">
+              Download and import character decomposition data (IDS) from the CJKVI project.
+              Enables structural component queries. Full replacement (~88K characters).
+            </div>
+          </div>
+          <v-btn
+            prepend-icon="mdi-refresh"
+            variant="tonal"
+            :loading="charIdsRefreshStarting"
+            :disabled="charIdsRefreshJob?.status === 'running'"
+            @click="startCharIdsRefresh"
+          >
+            Refresh
+          </v-btn>
+        </div>
+
+        <!-- Job status -->
+        <template v-if="charIdsRefreshJob">
+          <v-divider class="my-4" />
+
+          <!-- Running -->
+          <template v-if="charIdsRefreshJob.status === 'running'">
+            <div class="d-flex align-center justify-space-between mb-2">
+              <span class="text-body-2 font-weight-medium">Importing…</span>
+              <span class="text-caption text-medium-emphasis">
+                <template v-if="charIdsRefreshJob.totalChars">
+                  {{ charIdsRefreshJob.processedChars.toLocaleString() }} / {{ charIdsRefreshJob.totalChars.toLocaleString() }} characters
+                </template>
+                <template v-else>Starting…</template>
+              </span>
+            </div>
+            <v-progress-linear
+              :model-value="charIdsRefreshJob.percent ?? 0"
+              :indeterminate="charIdsRefreshJob.percent === null"
+              color="primary"
+              rounded
+              height="6"
+            />
+          </template>
+
+          <!-- Completed -->
+          <v-alert
+            v-else-if="charIdsRefreshJob.status === 'completed'"
+            type="success"
+            variant="tonal"
+            density="compact"
+            icon="mdi-check-circle-outline"
+          >
+            <span class="text-body-2">
+              Import complete —
+              {{ charIdsRefreshJob.processedChars.toLocaleString() }} characters processed.
+            </span>
+          </v-alert>
+
+          <!-- Failed -->
+          <v-alert
+            v-else-if="charIdsRefreshJob.status === 'failed'"
+            type="error"
+            variant="tonal"
+            density="compact"
+            icon="mdi-alert-circle-outline"
+          >
+            <span class="text-body-2">{{ charIdsRefreshJob.error ?? 'Refresh failed.' }}</span>
           </v-alert>
         </template>
       </v-card-text>

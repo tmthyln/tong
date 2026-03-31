@@ -1,4 +1,5 @@
 import { Hono } from 'hono'
+import charIdsRoutes from './char-ids'
 
 const dictionaryRoutes = new Hono<{ Bindings: Env }>()
 
@@ -616,5 +617,7 @@ dictionaryRoutes.get('/refresh/:jobId', async (c) => {
     error: job.error,
   })
 })
+
+dictionaryRoutes.route('/components', charIdsRoutes)
 
 export default dictionaryRoutes

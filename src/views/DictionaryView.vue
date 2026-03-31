@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, watch } from 'vue'
 import DictHeadword from '../components/DictHeadword.vue'
+import IdsTemplateNode, { type TemplateNode } from '../components/IdsTemplateNode.vue'
 import { pinyinToMarked } from '../utils/pinyin'
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -14,6 +15,7 @@ interface DictEntry {
 }
 
 type FilterKind = 'text' | 'strokes' | 'radical' | 'component' | 'tone' | 'definition'
+type StructureMatchMode = 'exact' | 'contains'
 
 interface ParsedToken {
   kind: FilterKind
@@ -96,7 +98,7 @@ interface Segmentation {
 
 // ── State ────────────────────────────────────────────────────────────────────
 
-const searchMode = ref<'basic' | 'advanced'>('basic')
+const searchMode = ref<'basic' | 'advanced' | 'structure'>('basic')
 const searchQuery = ref('')
 const showHelp = ref(false)
 
@@ -111,6 +113,16 @@ const segmentations = ref<Segmentation[]>([])
 const segLoading = ref(false)
 const segError = ref<string | null>(null)
 const segSearched = ref(false)
+
+// Structure
+const templateRoot = ref<TemplateNode>(null)
+const structureMatchMode = ref<StructureMatchMode>('contains')
+const structureResults = ref<Array<{ codepoint: string; character: string }>>([])
+const structureLoading = ref(false)
+const structureError = ref<string | null>(null)
+const structureSearched = ref(false)
+const expandedChar = ref<string | null>(null)
+const expandedIdsString = ref<string | null | undefined>(undefined)
 
 // Token parsing is only used in basic mode.
 const tokens = computed(() =>
@@ -194,13 +206,79 @@ watch(searchMode, (mode) => {
     segmentations.value = []
     segSearched.value = false
     segError.value = null
+  } else if (mode === 'advanced') {
+    results.value = []
+    searched.value = false
+    error.value = null
   } else {
     results.value = []
     searched.value = false
     error.value = null
   }
-  scheduleSearch()
+  if (mode !== 'structure') scheduleSearch()
 })
+
+// ── Structure search ──────────────────────────────────────────────────────────
+
+function templateHasContent(node: TemplateNode): boolean {
+  if (node === null) return false
+  if (node.type === 'char') return true
+  return node.children.some(templateHasContent)
+}
+
+let structureDebounceTimer: ReturnType<typeof setTimeout> | null = null
+
+function scheduleStructureSearch() {
+  if (structureDebounceTimer) clearTimeout(structureDebounceTimer)
+  structureDebounceTimer = setTimeout(runStructureSearch, 400)
+}
+
+async function runStructureSearch() {
+  if (!templateRoot.value || !templateHasContent(templateRoot.value)) {
+    structureResults.value = []
+    structureSearched.value = false
+    return
+  }
+  structureLoading.value = true
+  structureError.value = null
+  try {
+    const res = await fetch('/api/dictionary/components/search', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ template: templateRoot.value, mode: structureMatchMode.value }),
+    })
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    const data = await res.json() as { chars: Array<{ codepoint: string; character: string }> }
+    structureResults.value = data.chars
+    structureSearched.value = true
+  } catch (e) {
+    structureError.value = e instanceof Error ? e.message : 'Search failed'
+    structureResults.value = []
+  } finally {
+    structureLoading.value = false
+  }
+}
+
+watch(templateRoot, scheduleStructureSearch, { deep: true })
+watch(structureMatchMode, scheduleStructureSearch)
+
+async function toggleExpandedChar(char: string) {
+  if (expandedChar.value === char) {
+    expandedChar.value = null
+    expandedIdsString.value = undefined
+    return
+  }
+  expandedChar.value = char
+  expandedIdsString.value = undefined
+  try {
+    const res = await fetch(`/api/dictionary/components/${encodeURIComponent(char)}`)
+    if (!res.ok) { expandedIdsString.value = null; return }
+    const data = await res.json() as { entries: Array<{ idsString: string | null }> }
+    expandedIdsString.value = data.entries.find((e) => e.idsString != null)?.idsString ?? null
+  } catch {
+    expandedIdsString.value = null
+  }
+}
 
 // ── Display helpers ──────────────────────────────────────────────────────────
 
@@ -280,10 +358,20 @@ function fillExample(q: string) {
       >
         Basic
       </v-chip>
+      <v-chip
+        :variant="searchMode === 'structure' ? 'flat' : 'outlined'"
+        :color="searchMode === 'structure' ? 'primary' : undefined"
+        size="small"
+        style="cursor: pointer;"
+        @click="searchMode = 'structure'"
+      >
+        Structure
+      </v-chip>
     </div>
 
-    <!-- ── Search bar ─────────────────────────────────────────────────────── -->
+    <!-- ── Search bar (basic / advanced only) ────────────────────────────── -->
     <v-text-field
+      v-if="searchMode !== 'structure'"
       v-model="searchQuery"
       variant="outlined"
       density="comfortable"
@@ -307,6 +395,93 @@ function fillExample(q: string) {
         />
       </template>
     </v-text-field>
+
+    <!-- ── Structure builder panel ────────────────────────────────────────── -->
+    <template v-if="searchMode === 'structure'">
+      <v-card variant="outlined" class="mb-3 pa-3">
+        <div class="d-flex align-center justify-space-between mb-3">
+          <span class="text-body-2 font-weight-medium">Template</span>
+          <v-btn
+            size="small"
+            variant="text"
+            density="compact"
+            @click="templateRoot = null; structureResults = []; structureSearched = false"
+          >
+            Clear
+          </v-btn>
+        </div>
+
+        <IdsTemplateNode v-model="templateRoot" />
+
+        <div v-if="templateRoot === null" class="text-caption text-medium-emphasis mt-2">
+          Select a root operator above to start building a structural template.
+        </div>
+
+        <v-divider class="my-3" />
+
+        <v-btn-toggle
+          v-model="structureMatchMode"
+          density="compact"
+          variant="outlined"
+          mandatory
+        >
+          <v-btn value="contains" size="small">Contains</v-btn>
+          <v-btn value="exact" size="small">Exact root</v-btn>
+        </v-btn-toggle>
+      </v-card>
+
+      <!-- Structure loading / error -->
+      <div v-if="structureLoading" class="d-flex justify-center py-6">
+        <v-progress-circular indeterminate color="primary" size="32" />
+      </div>
+
+      <v-alert v-else-if="structureError" type="error" variant="tonal" class="mb-3" :text="structureError" />
+
+      <!-- Results grid -->
+      <template v-else-if="structureSearched && structureResults.length > 0">
+        <div class="text-caption text-medium-emphasis mb-2 pl-1">
+          {{ structureResults.length }} character{{ structureResults.length === 1 ? '' : 's' }}
+        </div>
+        <div class="char-grid">
+          <v-btn
+            v-for="item in structureResults"
+            :key="item.character"
+            :variant="expandedChar === item.character ? 'flat' : 'text'"
+            :color="expandedChar === item.character ? 'primary' : undefined"
+            density="compact"
+            class="char-cell"
+            @click="toggleExpandedChar(item.character)"
+          >
+            {{ item.character }}
+          </v-btn>
+        </div>
+
+        <!-- Expanded character panel -->
+        <v-expand-transition>
+          <v-card v-if="expandedChar" variant="outlined" class="mt-3 pa-3">
+            <div class="d-flex align-center ga-4">
+              <span style="font-size: 3rem; line-height: 1;">{{ expandedChar }}</span>
+              <div>
+                <div v-if="expandedIdsString" class="text-body-2 text-medium-emphasis">
+                  <span class="font-weight-medium">IDS:</span> {{ expandedIdsString }}
+                </div>
+                <div v-else-if="expandedIdsString === null" class="text-caption text-medium-emphasis">
+                  Atomic character (no decomposition)
+                </div>
+                <div v-else class="text-caption text-disabled">Loading…</div>
+              </div>
+            </div>
+          </v-card>
+        </v-expand-transition>
+      </template>
+
+      <template v-else-if="structureSearched && structureResults.length === 0">
+        <div class="text-center py-8 text-medium-emphasis">
+          <v-icon icon="mdi-magnify-remove-outline" size="40" class="mb-2 text-disabled" />
+          <div class="text-body-1">No characters match this template.</div>
+        </div>
+      </template>
+    </template>
 
     <!-- ── Parsed tokens (basic only) ────────────────────────────────────── -->
     <div v-if="searchMode === 'basic' && tokens.length" class="d-flex flex-wrap align-center ga-2 mb-3 pl-1">
@@ -574,5 +749,16 @@ code {
   background: rgba(var(--v-theme-primary), 0.08);
   padding: 1px 5px;
   border-radius: 4px;
+}
+
+.char-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.char-cell {
+  font-size: 1.4rem;
+  min-width: 48px;
+  height: 48px;
 }
 </style>

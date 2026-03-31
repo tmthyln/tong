@@ -9,6 +9,7 @@ import preferencesRoutes from './routes/preferences'
 
 export { IngestDocumentWorkflow } from './workflows/ingest-document'
 export { RefreshCedictWorkflow } from './workflows/refresh-cedict'
+export { RefreshCharIdsWorkflow } from './workflows/refresh-char-ids'
 export { Lexicon } from './lexicon'
 
 const app = new Hono<{ Bindings: Env }>()
