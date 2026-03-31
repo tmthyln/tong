@@ -1,8 +1,8 @@
 <script setup lang="ts">
 import { ref, computed, watch } from 'vue'
 import DictHeadword from '../components/DictHeadword.vue'
+import DictPronunciation from '../components/DictPronunciation.vue'
 import IdsTemplateNode, { type TemplateNode } from '../components/IdsTemplateNode.vue'
-import { pinyinToMarked } from '../utils/pinyin'
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -615,9 +615,14 @@ function fillExample(q: string) {
               </DictHeadword>
             </template>
             <v-list-item-title class="d-flex align-baseline ga-2 mb-1">
-              <span class="text-body-1 font-weight-medium" style="letter-spacing: 0.02em;">
-                {{ pinyinToMarked(entry.pinyin) }}
-              </span>
+              <DictPronunciation :pinyin="entry.pinyin" v-slot="{ all }">
+                <span class="text-body-1 font-weight-medium" style="letter-spacing: 0.02em;">{{ all[0] }}</span>
+                <span
+                  v-for="fmt in all.slice(1)"
+                  :key="fmt"
+                  class="text-caption text-medium-emphasis ml-2"
+                >{{ fmt }}</span>
+              </DictPronunciation>
             </v-list-item-title>
             <v-list-item-subtitle class="text-body-2" style="opacity: 1;">
               <span v-for="(def, di) in entry.definitions" :key="di">
@@ -704,9 +709,14 @@ function fillExample(q: string) {
                       <div v-if="secondary" class="text-disabled mb-1 dict-primary" style="font-size: 0.65rem;" @click="swap">{{ secondary }}</div>
                     </DictHeadword>
                     <!-- Pinyin -->
-                    <div class="text-caption text-primary font-weight-medium mb-1">
-                      {{ pinyinToMarked(entry.pinyin) }}
-                    </div>
+                    <DictPronunciation :pinyin="entry.pinyin" v-slot="{ all }">
+                      <div class="text-caption text-primary font-weight-medium mb-1">{{ all[0] }}</div>
+                      <div
+                        v-for="fmt in all.slice(1)"
+                        :key="fmt"
+                        class="text-caption text-medium-emphasis mb-1"
+                      >{{ fmt }}</div>
+                    </DictPronunciation>
                     <!-- First definition -->
                     <div
                       class="text-caption text-medium-emphasis"

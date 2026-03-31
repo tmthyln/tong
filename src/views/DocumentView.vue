@@ -4,8 +4,8 @@ import { useRoute } from 'vue-router'
 import { useLocalStorage } from '@vueuse/core'
 import { marked } from 'marked'
 import DictHeadword from '../components/DictHeadword.vue'
+import DictPronunciation from '../components/DictPronunciation.vue'
 import { useUser } from '../composables/useUser'
-import { pinyinToMarked } from '../utils/pinyin'
 import { useTranslation } from '../composables/useTranslation'
 import { useSelectionToolbar } from '../composables/useSelectionToolbar'
 import type { Entity, Chunk, Document } from '../types/document'
@@ -654,9 +654,13 @@ onUnmounted(() => {
                 <span class="text-h6 font-weight-light dict-primary" style="line-height: 1.1;" @click="swap">{{ primary }}</span>
                 <span v-if="secondary" class="text-caption text-disabled dict-primary" @click="swap">{{ secondary }}</span>
               </DictHeadword>
-              <span class="text-body-2 text-primary font-weight-medium">
-                {{ pinyinToMarked(entry.pinyin) }}
-              </span>
+              <DictPronunciation :pinyin="entry.pinyin" v-slot="{ text, all, cycle }">
+                <span
+                  class="text-body-2 text-primary font-weight-medium"
+                  :style="all.length > 1 ? 'cursor: pointer' : ''"
+                  @click.stop="cycle"
+                >{{ text }}</span>
+              </DictPronunciation>
             </div>
             <div class="text-body-2 text-medium-emphasis">
               <span v-for="(def, i) in entry.definitions" :key="i">
