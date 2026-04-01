@@ -7,6 +7,41 @@ import type { EdgeTypeInput } from '../lib/relationship-extraction'
 
 const knowledgeRoutes = new Hono<{ Bindings: Env }>()
 
+// GET /api/knowledge/graph?documentId=<id>
+//
+// Returns nodes (document-scoped entities) and links (document-scoped relationships)
+// suitable for D3 force simulation rendering.
+knowledgeRoutes.get('/graph', async (c) => {
+  const documentId = parseInt(c.req.query('documentId') ?? '', 10)
+  if (!documentId || isNaN(documentId)) {
+    return c.json({ error: 'documentId is required' }, 400)
+  }
+
+  const [nodeRows, linkRows] = await Promise.all([
+    c.env.DB
+      .prepare(
+        `SELECT id, label, entity_type, preferred_translation
+         FROM extracted_entity
+         WHERE source_document_id = ? AND scope = 'document'`
+      )
+      .bind(documentId)
+      .all<{ id: number; label: string | null; entity_type: string; preferred_translation: string | null }>(),
+    c.env.DB
+      .prepare(
+        `SELECT er.id, er.from_entity_id AS source, er.to_entity_id AS target, er.edge_type, er.explanation
+         FROM extracted_relationship er
+         WHERE er.source_document_id = ? AND er.scope = 'document'`
+      )
+      .bind(documentId)
+      .all<{ id: number; source: number; target: number; edge_type: string; explanation: string | null }>(),
+  ])
+
+  const nodeIds = new Set(nodeRows.results.map((n) => n.id))
+  const links = linkRows.results.filter((l) => nodeIds.has(l.source) && nodeIds.has(l.target))
+
+  return c.json({ nodes: nodeRows.results, links })
+})
+
 // POST /api/knowledge/document-entity-summary
 //
 // Request body: { documentId: number, entityId: number }
