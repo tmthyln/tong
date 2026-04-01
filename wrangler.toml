@@ -22,12 +22,22 @@ enabled = true
 
 [durable_objects]
 bindings = [
-  { name = "LEXICON", class_name = "Lexicon" }
+  { name = "LEXICON", class_name = "Lexicon" },
+  { name = "UMAP_CONTAINER", class_name = "UmapContainer" }
 ]
 
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["Lexicon"]
+
+[[migrations]]
+tag = "v2"
+new_sqlite_classes = ["UmapContainer"]
+
+[[containers]]
+class_name = "UmapContainer"
+image = "./container/Dockerfile"
+max_instances = 3
 
 [[d1_databases]]
 binding = "DB"

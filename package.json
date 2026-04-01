@@ -14,8 +14,10 @@
 		"test": "vitest --config vitest.config.ts"
 	},
 	"dependencies": {
+		"@cloudflare/containers": "^0.2.1",
 		"@mdi/font": "^7.4.47",
 		"@vueuse/core": "^14.2.1",
+		"d3": "^7.9.0",
 		"diff": "^8.0.3",
 		"fflate": "^0.8.2",
 		"hono": "^4.11.7",
@@ -27,6 +29,7 @@
 	"devDependencies": {
 		"@cloudflare/vite-plugin": "^1.22.0",
 		"@tsconfig/node24": "^24.0.4",
+		"@types/d3": "^7.4.3",
 		"@types/diff": "^7.0.2",
 		"@types/node": "^24.10.9",
 		"@vitejs/plugin-vue": "^6.0.3",
