@@ -114,6 +114,41 @@ const entityById = computed<Map<number, Entity>>(() => {
   return map
 })
 
+type RelDisplay = { key: string; edgeLabel: string; otherName: string }
+
+// Map from parent entity ID → display-ready relationships
+const docRelsByEntityId = computed<Map<number, RelDisplay[]>>(() => {
+  const map = new Map<number, RelDisplay[]>()
+  for (const rel of document.value?.relationships ?? []) {
+    const fromEntry: RelDisplay = { key: `${rel.id}:from`, edgeLabel: rel.edgeType, otherName: rel.toLabel ?? '?' }
+    const toEntry: RelDisplay   = { key: `${rel.id}:to`, edgeLabel: rel.edgeReverseName ?? `← ${rel.edgeType}`, otherName: rel.fromLabel ?? '?' }
+    if (!map.has(rel.fromEntityId)) map.set(rel.fromEntityId, [])
+    if (!map.has(rel.toEntityId))   map.set(rel.toEntityId, [])
+    map.get(rel.fromEntityId)!.push(fromEntry)
+    map.get(rel.toEntityId)!.push(toEntry)
+  }
+  return map
+})
+
+// Map from chunk entity ID → display-ready relationships
+const chunkRelsByEntityId = computed<Map<number, RelDisplay[]>>(() => {
+  const map = new Map<number, RelDisplay[]>()
+  for (const rel of document.value?.chunkRelationships ?? []) {
+    const fromEntry: RelDisplay = { key: `${rel.id}:from`, edgeLabel: rel.edgeType, otherName: rel.toText ?? '?' }
+    const toEntry: RelDisplay   = { key: `${rel.id}:to`, edgeLabel: rel.edgeReverseName ?? `← ${rel.edgeType}`, otherName: rel.fromText ?? '?' }
+    if (!map.has(rel.fromEntityId)) map.set(rel.fromEntityId, [])
+    if (!map.has(rel.toEntityId))   map.set(rel.toEntityId, [])
+    map.get(rel.fromEntityId)!.push(fromEntry)
+    map.get(rel.toEntityId)!.push(toEntry)
+  }
+  return map
+})
+
+function getEntityRels(entity: Entity): RelDisplay[] {
+  if (entity.parentId != null) return docRelsByEntityId.value.get(entity.parentId) ?? []
+  return chunkRelsByEntityId.value.get(entity.id) ?? []
+}
+
 function renderChunk(chunk: Chunk): string {
   const entities = chunk.entities
     .filter((e): e is Entity & { startIndex: number; endIndex: number; extractedText: string } =>
@@ -444,11 +479,19 @@ onUnmounted(() => {
                   :data-entity-id="entity.id"
                   @click="clickAnnotation(chunk.id, entity.id)"
                 >
-                  <span class="reader-annotation-text">{{ entity.extractedText }}</span>
-                  <span v-if="entity.label || entity.preferredTranslation" class="reader-annotation-label">
-                    {{ entity.preferredTranslation || entity.label }}
-                  </span>
-                  <span class="reader-annotation-type">{{ entity.entityType }}</span>
+                  <div class="reader-annotation-header">
+                    <span class="reader-annotation-text">{{ entity.extractedText }}</span>
+                    <span v-if="entity.label || entity.preferredTranslation" class="reader-annotation-label">
+                      {{ entity.preferredTranslation || entity.label }}
+                    </span>
+                    <span class="reader-annotation-type">{{ entity.entityType }}</span>
+                  </div>
+                  <div v-if="getEntityRels(entity).length" class="reader-annotation-rels">
+                    <span v-for="rel in getEntityRels(entity)" :key="rel.key" class="reader-annotation-rel">
+                      <span class="reader-annotation-rel-edge">{{ rel.edgeLabel }}</span>
+                      <span class="reader-annotation-rel-other">{{ rel.otherName }}</span>
+                    </span>
+                  </div>
                 </div>
               </template>
             </div>
@@ -964,13 +1007,47 @@ onUnmounted(() => {
 
 .reader-annotation-item {
   display: flex;
-  align-items: baseline;
-  gap: 6px;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
   cursor: pointer;
   padding: 3px 6px;
   border-radius: 4px;
   border-left: 2px solid rgba(var(--v-border-color), var(--v-border-opacity));
   font-size: 0.9rem;
+}
+
+.reader-annotation-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.reader-annotation-rels {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.reader-annotation-rel {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 0.7rem;
+  background: rgba(var(--v-theme-surface-variant), 0.5);
+  border-radius: 4px;
+  padding: 1px 5px;
+  opacity: 0.85;
+}
+
+.reader-annotation-rel-edge {
+  color: rgba(var(--v-theme-on-surface), 0.55);
+  font-style: italic;
+}
+
+.reader-annotation-rel-other {
+  color: rgba(var(--v-theme-on-surface), 0.9);
 }
 
 .reader-annotation-item:hover {

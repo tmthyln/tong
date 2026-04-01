@@ -364,10 +364,12 @@ libraryRoutes.get('/document/:id', async (c) => {
     c.env.DB.prepare(
       `SELECT er.id, er.from_entity_id, er.to_entity_id, er.edge_type, er.explanation,
               fe.extracted_text AS from_text, fe.entity_type AS from_type,
-              te.extracted_text AS to_text, te.entity_type AS to_type
+              te.extracted_text AS to_text, te.entity_type AS to_type,
+              et.reverse_name AS edge_reverse_name
        FROM extracted_relationship er
        JOIN extracted_entity fe ON fe.id = er.from_entity_id
        JOIN extracted_entity te ON te.id = er.to_entity_id
+       LEFT JOIN edge_type et ON et.name = er.edge_type
        WHERE er.source_document_id = ? AND er.scope = 'chunk'`
     )
       .bind(id)
@@ -381,14 +383,17 @@ libraryRoutes.get('/document/:id', async (c) => {
         from_type: string
         to_text: string | null
         to_type: string
+        edge_reverse_name: string | null
       }>(),
     c.env.DB.prepare(
       `SELECT er.id, er.from_entity_id, er.to_entity_id, er.edge_type, er.explanation,
               fe.label AS from_label, fe.entity_type AS from_type,
-              te.label AS to_label, te.entity_type AS to_type
+              te.label AS to_label, te.entity_type AS to_type,
+              et.reverse_name AS edge_reverse_name
        FROM extracted_relationship er
        JOIN extracted_entity fe ON fe.id = er.from_entity_id
        JOIN extracted_entity te ON te.id = er.to_entity_id
+       LEFT JOIN edge_type et ON et.name = er.edge_type
        WHERE er.source_document_id = ? AND er.scope = 'document'`
     )
       .bind(id)
@@ -402,6 +407,7 @@ libraryRoutes.get('/document/:id', async (c) => {
         from_type: string
         to_label: string | null
         to_type: string
+        edge_reverse_name: string | null
       }>(),
   ])
 
@@ -423,6 +429,7 @@ libraryRoutes.get('/document/:id', async (c) => {
     fromEntityId: r.from_entity_id,
     toEntityId: r.to_entity_id,
     edgeType: r.edge_type,
+    edgeReverseName: r.edge_reverse_name,
     explanation: r.explanation,
     fromText: r.from_text,
     fromType: r.from_type,
@@ -435,6 +442,7 @@ libraryRoutes.get('/document/:id', async (c) => {
     fromEntityId: r.from_entity_id,
     toEntityId: r.to_entity_id,
     edgeType: r.edge_type,
+    edgeReverseName: r.edge_reverse_name,
     explanation: r.explanation,
     fromLabel: r.from_label,
     fromType: r.from_type,

@@ -26,6 +26,28 @@ export interface Chunk {
   availableTranslationDrafts: number[]
 }
 
+export interface Relationship {
+  id: number
+  fromEntityId: number
+  toEntityId: number
+  edgeType: string
+  edgeReverseName: string | null
+  explanation: string | null
+  fromLabel: string | null
+  toLabel: string | null
+}
+
+export interface ChunkRelationship {
+  id: number
+  fromEntityId: number
+  toEntityId: number
+  edgeType: string
+  edgeReverseName: string | null
+  explanation: string | null
+  fromText: string | null
+  toText: string | null
+}
+
 export interface Document {
   id: number
   title: string | null
@@ -40,4 +62,6 @@ export interface Document {
   extractedContent: string
   entities: Entity[]
   chunks: Chunk[]
+  relationships: Relationship[]
+  chunkRelationships: ChunkRelationship[]
 }
