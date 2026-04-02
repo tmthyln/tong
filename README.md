@@ -76,22 +76,3 @@ npx wrangler r2 bucket create tong-documents
 # create vector stores
 npx wrangler vectorize create tong-doc-chunks --dimensions=768 --metric=cosine
 ```
-
-
-## Plan
-
-These are the outstanding tasks and major directions for the future of the project.
-
-- Visual analytic for understanding the whole corpus of documents by topic
-- When processing documents, extract a local knowledge graph from each chunk
-  - extract entities based on a list of possible types
-  - extract relationships based on a list of possible types
-- Users can identify new entities (with potentially new entity types) in text, which can trigger reprocessing of other documents
-- Dictionary lookups of single characters or phrases (or longer strings of text) using a combination of lookup methods:
-  - term-matching on headwords
-  - matching on pinyin/zhuyin pronunciation with tones
-  - structural matching on subcomponents
-- Integrated dictionary lookup in native text
-  - Highlight some text and ask for definitions with context
-- Tailored agentic workflows for document understanding and translation
-  - during translation, identify a thing/entity and ask "what is this, what is known about them, and what is relevant to my current task?"
