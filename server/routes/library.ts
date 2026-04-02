@@ -172,6 +172,152 @@ libraryRoutes.get('/document', async (c) => {
   })
 })
 
+libraryRoutes.get('/document/:id/similar', async (c) => {
+  const id = parseInt(c.req.param('id'), 10)
+  if (isNaN(id)) {
+    return c.json({ error: 'Invalid document ID' }, 400)
+  }
+
+  // 1. Fetch all chunk IDs for this document
+  const chunksResult = await c.env.DB.prepare(
+    'SELECT id FROM text_chunk WHERE source_document_id = ?'
+  )
+    .bind(id)
+    .all<{ id: number }>()
+
+  const chunkIds = chunksResult.results.map((r) => r.id)
+  if (chunkIds.length === 0) {
+    return c.json([])
+  }
+
+  // 2. Batch-fetch all embeddings (max 20 IDs per call)
+  const vectorBatches: Array<{ id: string; values: number[] } | null>[] = []
+  for (let i = 0; i < chunkIds.length; i += 20) {
+    const batch = chunkIds.slice(i, i + 20).map(String)
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const result = await (c.env.CHUNK_VECTORS as any).getByIds(
+      batch,
+      { namespace: 'document' }
+    ) as Array<{ id: string; values: number[] } | null>
+    vectorBatches.push(...result)
+  }
+  const vectors = vectorBatches
+
+  const validVectors = vectors.filter(
+    (v): v is { id: string; values: number[] } => v != null && Array.isArray(v.values)
+  )
+
+  if (validVectors.length === 0) {
+    return c.json([])
+  }
+
+  // 3. Query nearest neighbors for each chunk vector (parallel)
+  const queryResults = await Promise.all(
+    validVectors.map((vector) =>
+      c.env.CHUNK_VECTORS.query(vector.values, {
+        topK: 8,
+        namespace: 'document',
+        returnMetadata: 'all',
+        filter: { sourceDocumentId: { $ne: id } },
+      })
+    )
+  )
+
+  // 4. Build matchCount and bestMatch maps keyed by candidate doc ID
+  const matchCount = new Map<number, number>()
+  const bestMatch = new Map<number, { chunkId: number; score: number }>()
+
+  for (const result of queryResults) {
+    for (const match of result.matches) {
+      const meta = match.metadata as { sourceDocumentId?: number; chunkId?: number } | undefined
+      const docId = meta?.sourceDocumentId
+      const chunkId = meta?.chunkId
+      if (docId == null || chunkId == null) continue
+
+      matchCount.set(docId, (matchCount.get(docId) ?? 0) + 1)
+
+      const existing = bestMatch.get(docId)
+      if (!existing || match.score > existing.score) {
+        bestMatch.set(docId, { chunkId, score: match.score })
+      }
+    }
+  }
+
+  if (matchCount.size === 0) {
+    return c.json([])
+  }
+
+  // 5. Fetch total chunk counts for all candidate docs in one query
+  const candidateDocIds = [...matchCount.keys()]
+  const countsPlaceholders = candidateDocIds.map(() => '?').join(', ')
+  const countsResult = await c.env.DB.prepare(
+    `SELECT source_document_id, COUNT(*) as total
+     FROM text_chunk
+     WHERE source_document_id IN (${countsPlaceholders})
+     GROUP BY source_document_id`
+  )
+    .bind(...candidateDocIds)
+    .all<{ source_document_id: number; total: number }>()
+
+  const totalChunksMap = new Map<number, number>()
+  for (const row of countsResult.results) {
+    totalChunksMap.set(row.source_document_id, row.total)
+  }
+
+  // 6. Compute Jaccard score, sort descending, take top 4
+  const scored = candidateDocIds
+    .map((docId) => ({
+      docId,
+      score: (matchCount.get(docId) ?? 0) / (totalChunksMap.get(docId) ?? 1),
+      bestChunkId: bestMatch.get(docId)!.chunkId,
+    }))
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 4)
+
+  if (scored.length === 0) {
+    return c.json([])
+  }
+
+  // 7. Fetch document metadata + snippet chunk content for top 4
+  const top4DocIds = scored.map((s) => s.docId)
+  const top4ChunkIds = scored.map((s) => s.bestChunkId)
+  const docPlaceholders = top4DocIds.map(() => '?').join(', ')
+  const chunkPlaceholders = top4ChunkIds.map(() => '?').join(', ')
+
+  const [docsResult, snippetsResult] = await Promise.all([
+    c.env.DB.prepare(
+      `SELECT id, title, original_doc_filename FROM document WHERE id IN (${docPlaceholders})`
+    )
+      .bind(...top4DocIds)
+      .all<{ id: number; title: string | null; original_doc_filename: string }>(),
+    c.env.DB.prepare(
+      `SELECT id, content FROM text_chunk WHERE id IN (${chunkPlaceholders})`
+    )
+      .bind(...top4ChunkIds)
+      .all<{ id: number; content: string }>(),
+  ])
+
+  const docMap = new Map(docsResult.results.map((d) => [d.id, d]))
+  const chunkMap = new Map(snippetsResult.results.map((ch) => [ch.id, ch]))
+
+  const similar = scored
+    .map((s) => {
+      const doc = docMap.get(s.docId)
+      const snippet = chunkMap.get(s.bestChunkId)
+      if (!doc) return null
+      return {
+        id: doc.id,
+        title: doc.title,
+        filename: doc.original_doc_filename,
+        jaccardScore: s.score,
+        snippet: (snippet?.content ?? '').slice(0, 300),
+      }
+    })
+    .filter((s): s is NonNullable<typeof s> => s != null)
+
+  return c.json(similar)
+})
+
 libraryRoutes.get('/document/:id', async (c) => {
   const id = parseInt(c.req.param('id'), 10)
   if (isNaN(id)) {

@@ -8,7 +8,7 @@ import DictPronunciation from '../components/DictPronunciation.vue'
 import { useUser } from '../composables/useUser'
 import { useTranslation } from '../composables/useTranslation'
 import { useSelectionToolbar } from '../composables/useSelectionToolbar'
-import type { Entity, Chunk, Document } from '../types/document'
+import type { Entity, Chunk, Document, SimilarDoc } from '../types/document'
 
 type DocumentMode = 'reading' | 'translation' | 'reader'
 
@@ -252,7 +252,26 @@ const {
   deleteEntity,
 } = useSelectionToolbar(document, entityById, fetchDocument)
 
+const similarDocs = ref<SimilarDoc[] | null>(null)
+const similarLoading = ref(false)
+
 // ── Document fetch ────────────────────────────────────────────────────────────
+
+async function fetchSimilarDocs() {
+  const id = route.params.id
+  if (!id) return
+  similarLoading.value = true
+  try {
+    const response = await fetch(`/api/library/document/${id}/similar`)
+    if (response.ok) {
+      similarDocs.value = await response.json()
+    }
+  } catch {
+    // non-critical — fail silently
+  } finally {
+    similarLoading.value = false
+  }
+}
 
 async function fetchDocument() {
   const id = route.params.id
@@ -332,6 +351,7 @@ function clickAnnotation(chunkId: number, entityId: number) {
 onMounted(() => {
   window.addEventListener('resize', computeOverview)
   fetchDocument()
+  fetchSimilarDocs()
 })
 
 onUnmounted(() => {
@@ -499,6 +519,27 @@ onUnmounted(() => {
         </div>
       </div>
     </template>
+
+    <div v-if="similarDocs || similarLoading" class="mt-8">
+      <div class="text-subtitle-1 text-medium-emphasis mb-3">Similar Documents</div>
+      <div v-if="similarLoading" class="d-flex ga-3">
+        <v-skeleton-loader v-for="i in 4" :key="i" type="card" width="220" />
+      </div>
+      <div v-else-if="similarDocs?.length" class="d-flex flex-wrap ga-3">
+        <v-card
+          v-for="doc in similarDocs"
+          :key="doc.id"
+          :to="`/document/${doc.id}`"
+          variant="outlined"
+          class="similar-doc-card"
+        >
+          <v-card-title class="text-body-1">{{ doc.title || doc.filename }}</v-card-title>
+          <v-card-text class="text-body-2 text-medium-emphasis">
+            <span class="similar-doc-snippet">{{ doc.snippet }}</span>
+          </v-card-text>
+        </v-card>
+      </div>
+    </div>
   </div>
 
   <!-- ── Selection toolbar (teleported to body) ───────────────────────────── -->
@@ -1070,6 +1111,18 @@ onUnmounted(() => {
   text-transform: uppercase;
   letter-spacing: 0.04em;
   margin-left: auto;
+}
+
+.similar-doc-card {
+  flex: 1;
+  min-width: 0;
+}
+
+.similar-doc-snippet {
+  display: -webkit-box;
+  -webkit-line-clamp: 4;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
 }
 
 </style>

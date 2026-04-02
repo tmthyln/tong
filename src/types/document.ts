@@ -48,6 +48,14 @@ export interface ChunkRelationship {
   toText: string | null
 }
 
+export interface SimilarDoc {
+  id: number
+  title: string | null
+  filename: string
+  jaccardScore: number
+  snippet: string
+}
+
 export interface Document {
   id: number
   title: string | null
