@@ -3,6 +3,7 @@ import { storeUploadedFile } from '../lib/documents'
 import { loadExtractedContent } from '../lib/extract-content'
 import { removeOverlaps } from '../lib/entity-extraction'
 import { getUserId, userType } from '../lib/auth'
+import { extractTermsFromText } from '../lib/text-terms'
 
 const libraryRoutes = new Hono<{ Bindings: Env }>()
 
@@ -665,6 +666,53 @@ libraryRoutes.get('/document/:id', async (c) => {
   })
 })
 
+libraryRoutes.post('/chunks/seen', async (c) => {
+  const userId = getUserId(c)
+  if (userType(userId) === 'public') {
+    return new Response(null, { status: 204 })
+  }
+
+  const body = await c.req.json<{ chunkIds: unknown }>().catch(() => null)
+  if (!body || !Array.isArray(body.chunkIds)) {
+    return new Response(null, { status: 204 })
+  }
+
+  const chunkIds = Array.from(
+    new Set(
+      body.chunkIds
+        .map((v) => (typeof v === 'number' ? v : parseInt(String(v), 10)))
+        .filter((n) => Number.isInteger(n) && n > 0)
+    )
+  ).slice(0, 200)
+
+  if (chunkIds.length === 0) {
+    return new Response(null, { status: 204 })
+  }
+
+  c.executionCtx.waitUntil(
+    (async () => {
+      const contents: string[] = []
+      for (let i = 0; i < chunkIds.length; i += 99) {
+        const batch = chunkIds.slice(i, i + 99)
+        const placeholders = batch.map(() => '?').join(', ')
+        const result = await c.env.DB.prepare(
+          `SELECT content FROM text_chunk WHERE id IN (${placeholders})`
+        )
+          .bind(...batch)
+          .all<{ content: string }>()
+        for (const row of result.results) contents.push(row.content)
+      }
+      if (contents.length === 0) return
+      const terms = await extractTermsFromText(contents.join('\n'), c.env.DB)
+      if (terms.length === 0) return
+      const lexicon = c.env.LEXICON.get(c.env.LEXICON.idFromName(userId))
+      await lexicon.markSeenBulk(terms)
+    })()
+  )
+
+  return new Response(null, { status: 204 })
+})
+
 libraryRoutes.get('/chunk/:chunkId/translation', async (c) => {
   const chunkId = parseInt(c.req.param('chunkId'), 10)
   const draftNumber = parseInt(c.req.query('draft') ?? '', 10)
@@ -727,6 +775,22 @@ libraryRoutes.put('/chunk/:chunkId/translation', async (c) => {
       .bind(body.content, userId, now, chunkId, draftNumber)
       .run()
     created = false
+  }
+
+  if (created) {
+    c.executionCtx.waitUntil(
+      c.env.DB.prepare('SELECT content FROM text_chunk WHERE id = ?')
+        .bind(chunkId)
+        .first<{ content: string }>()
+        .then((row) => {
+          if (!row) return
+          return extractTermsFromText(row.content, c.env.DB).then((terms) => {
+            if (terms.length === 0) return
+            const lexicon = c.env.LEXICON.get(c.env.LEXICON.idFromName(userId))
+            return lexicon.markLearnedBulk(terms)
+          })
+        })
+    )
   }
 
   return c.json({ draftNumber, translator: userId, dateLastModified: now, created })

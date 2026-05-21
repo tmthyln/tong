@@ -19,6 +19,45 @@ const document = ref<Document | null>(null)
 const loading = ref(false)
 const error = ref<string | null>(null)
 let gridResizeObserver: ResizeObserver | null = null
+let chunkObserver: IntersectionObserver | null = null
+const observedChunks = new Set<number>()
+const pendingSeen = new Set<number>()
+let seenFlushTimer: ReturnType<typeof setTimeout> | null = null
+
+function flushSeen(useBeacon = false) {
+  if (seenFlushTimer) {
+    clearTimeout(seenFlushTimer)
+    seenFlushTimer = null
+  }
+  if (pendingSeen.size === 0) return
+  const chunkIds = [...pendingSeen]
+  pendingSeen.clear()
+  const body = JSON.stringify({ chunkIds })
+  if (useBeacon && navigator.sendBeacon) {
+    navigator.sendBeacon('/api/library/chunks/seen', new Blob([body], { type: 'application/json' }))
+  } else {
+    fetch('/api/library/chunks/seen', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body,
+      keepalive: true,
+    })
+  }
+}
+
+function scheduleSeen(chunkId: number) {
+  pendingSeen.add(chunkId)
+  if (seenFlushTimer) clearTimeout(seenFlushTimer)
+  seenFlushTimer = setTimeout(() => flushSeen(false), 1500)
+}
+
+function onVisibilityChange() {
+  if (window.document.visibilityState === 'hidden') flushSeen(true)
+}
+
+function onPageHide() {
+  flushSeen(true)
+}
 
 const documentTitle = computed(() => {
   if (!document.value) return ''
@@ -250,6 +289,7 @@ const {
   openEntityCreate,
   createEntity,
   deleteEntity,
+  markFailed,
 } = useSelectionToolbar(document, entityById, fetchDocument)
 
 const similarDocs = ref<SimilarDoc[] | null>(null)
@@ -348,15 +388,55 @@ function clickAnnotation(chunkId: number, entityId: number) {
   span?.click()
 }
 
+function observeChunks() {
+  if (!chunkObserver) return
+  const els = window.document.querySelectorAll<HTMLElement>('[data-chunk-id]')
+  for (const el of els) {
+    const chunkId = Number(el.getAttribute('data-chunk-id'))
+    if (!observedChunks.has(chunkId)) {
+      observedChunks.add(chunkId)
+      chunkObserver.observe(el)
+    }
+  }
+}
+
+watch(document, async (val) => {
+  if (!val) return
+  observedChunks.clear()
+  await nextTick()
+  observeChunks()
+})
+
 onMounted(() => {
   window.addEventListener('resize', computeOverview)
+  window.document.addEventListener('visibilitychange', onVisibilityChange)
+  window.addEventListener('pagehide', onPageHide)
+
+  chunkObserver = new IntersectionObserver(
+    (entries) => {
+      for (const entry of entries) {
+        if (!entry.isIntersecting) continue
+        const chunkId = Number((entry.target as HTMLElement).getAttribute('data-chunk-id'))
+        chunkObserver!.unobserve(entry.target)
+        scheduleSeen(chunkId)
+      }
+    },
+    { threshold: 0.5 }
+  )
+
   fetchDocument()
   fetchSimilarDocs()
 })
 
 onUnmounted(() => {
   window.removeEventListener('resize', computeOverview)
+  window.document.removeEventListener('visibilitychange', onVisibilityChange)
+  window.removeEventListener('pagehide', onPageHide)
+  flushSeen(true)
   gridResizeObserver?.disconnect()
+  chunkObserver?.disconnect()
+  chunkObserver = null
+  observedChunks.clear()
   window.document.getElementById('tong-chunk-scrollbar')?.remove()
 })
 </script>
@@ -555,6 +635,14 @@ onUnmounted(() => {
           @click="lookupInDictionary"
         >
           Define
+        </v-btn>
+        <v-btn
+          size="small"
+          variant="text"
+          prepend-icon="mdi-close-circle-outline"
+          @click="markFailed"
+        >
+          Don't know
         </v-btn>
         <v-btn
           v-if="activeEntityId != null"

@@ -399,6 +399,21 @@ export function useSelectionToolbar(
     }
   }
 
+  async function markFailed() {
+    if (!toolbar.value.text) return
+    toolbar.value.loading = true
+    toolbar.value.error = null
+    try {
+      const res = await fetch(`/api/lexicon/${encodeURIComponent(toolbar.value.text)}/fail`, { method: 'POST' })
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      toolbar.value.show = false
+    } catch (e) {
+      toolbar.value.error = e instanceof Error ? e.message : 'Mark failed'
+    } finally {
+      toolbar.value.loading = false
+    }
+  }
+
   async function deleteEntity() {
     if (activeEntityId.value == null) return
     toolbar.value.loading = true
@@ -484,5 +499,6 @@ export function useSelectionToolbar(
     openEntityCreate,
     createEntity,
     deleteEntity,
+    markFailed,
   }
 }

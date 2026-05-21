@@ -59,10 +59,6 @@ lexiconRoutes.post('/:term/fail', async (c) => {
   const term = c.req.param('term')
   const lexicon = getLexicon(c, c.env)
   const entry = await lexicon.markFailed(term)
-
-  if (!entry) {
-    return c.json({ error: 'Term not found' }, 404)
-  }
   return c.json({ message: 'Term marked as failed', entry })
 })
 
