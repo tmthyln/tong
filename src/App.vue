@@ -35,6 +35,7 @@ const navItems = [
   { title: 'Dictionary', icon: 'mdi-book-alphabet', to: '/dictionary' },
   { title: 'Lexicon', icon: 'mdi-format-list-bulleted-type', to: '/lexicon' },
   { title: 'Knowledge Graph', icon: 'mdi-graph-outline', to: '/knowledge-graph' },
+  { title: 'Knowledge Scopes', icon: 'mdi-layers-triple-outline', to: '/knowledge-scopes' },
   { title: 'Library', icon: 'mdi-bookshelf', to: '/library' },
   { title: 'Settings', icon: 'mdi-cog', to: '/settings' },
 ]

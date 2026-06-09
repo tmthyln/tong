@@ -24,6 +24,7 @@ interface IngestDocumentParams {
   contentHash: string
   dateUploaded: string
   parentId: number | null
+  knowledgeScopeId: number | null
 }
 
 interface EntityTypeContext {
@@ -61,8 +62,9 @@ export class IngestDocumentWorkflow extends WorkflowEntrypoint<Env, IngestDocume
           extracted_doc_location,
           extracted_doc_char_count,
           extracted_doc_unique_char_count,
-          parent_id
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          parent_id,
+          knowledge_scope_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         RETURNING id`
       )
         .bind(
@@ -75,7 +77,8 @@ export class IngestDocumentWorkflow extends WorkflowEntrypoint<Env, IngestDocume
           extractedLocation,
           charStats.charCount,
           charStats.uniqueCharCount,
-          payload.parentId
+          payload.parentId,
+          payload.knowledgeScopeId
         )
         .first<{ id: number }>()
 

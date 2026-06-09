@@ -7,7 +7,14 @@ export interface Entity {
   label: string | null
   scope: string
   parentId: number | null
+  knowledgeScopeId?: number | null
   preferredTranslation: string | null
+}
+
+export interface KnowledgeScope {
+  id: number
+  name: string
+  parentId: number | null
 }
 
 export interface Chunk {
@@ -67,6 +74,7 @@ export interface Document {
   charCount: number
   uniqueCharCount: number
   parentId: number | null
+  knowledgeScopeId: number | null
   extractedContent: string
   entities: Entity[]
   chunks: Chunk[]

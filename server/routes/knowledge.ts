@@ -8,39 +8,116 @@ import type { EdgeTypeInput } from '../lib/relationship-extraction'
 const knowledgeRoutes = new Hono<{ Bindings: Env }>()
 
 // GET /api/knowledge/graph?documentId=<id>
+// GET /api/knowledge/graph?knowledgeScopeId=<id>
 //
-// Returns nodes (document-scoped entities) and links (document-scoped relationships)
-// suitable for D3 force simulation rendering.
+// Returns nodes and links suitable for D3 force simulation rendering.
+// - documentId: the document's document-scoped entities/relationships.
+// - knowledgeScopeId: the union of the document-scoped graphs of every document
+//   assigned to that scope (or any descendant scope), plus any scope-level
+//   entities/relationships attached directly to those scopes. Cross-document
+//   entity merging is a future upward-resolution step.
 knowledgeRoutes.get('/graph', async (c) => {
   const documentId = parseInt(c.req.query('documentId') ?? '', 10)
-  if (!documentId || isNaN(documentId)) {
-    return c.json({ error: 'documentId is required' }, 400)
-  }
+  const knowledgeScopeId = parseInt(c.req.query('knowledgeScopeId') ?? '', 10)
 
-  const [nodeRows, linkRows] = await Promise.all([
-    c.env.DB
-      .prepare(
-        `SELECT id, label, entity_type, preferred_translation
-         FROM extracted_entity
-         WHERE source_document_id = ? AND scope = 'document'`
-      )
-      .bind(documentId)
-      .all<{ id: number; label: string | null; entity_type: string; preferred_translation: string | null }>(),
-    c.env.DB
-      .prepare(
-        `SELECT er.id, er.from_entity_id AS source, er.to_entity_id AS target, er.edge_type, er.explanation
-         FROM extracted_relationship er
-         WHERE er.source_document_id = ? AND er.scope = 'document'`
-      )
-      .bind(documentId)
-      .all<{ id: number; source: number; target: number; edge_type: string; explanation: string | null }>(),
-  ])
+  let nodeRows: D1Result<GraphNode>
+  let linkRows: D1Result<GraphLink>
+
+  if (knowledgeScopeId && !isNaN(knowledgeScopeId)) {
+    // Collect this scope and all descendant scope ids.
+    const scopeRows = await c.env.DB.prepare('SELECT id, parent_id FROM knowledge_scope').all<{
+      id: number
+      parent_id: number | null
+    }>()
+    const childrenOf = new Map<number, number[]>()
+    for (const s of scopeRows.results) {
+      if (s.parent_id !== null) {
+        const arr = childrenOf.get(s.parent_id) ?? []
+        arr.push(s.id)
+        childrenOf.set(s.parent_id, arr)
+      }
+    }
+    const scopeIds: number[] = []
+    const queue = [knowledgeScopeId]
+    while (queue.length > 0) {
+      const sid = queue.shift()!
+      scopeIds.push(sid)
+      queue.push(...(childrenOf.get(sid) ?? []))
+    }
+
+    const docRows = await c.env.DB.prepare(
+      `SELECT id FROM document WHERE knowledge_scope_id IN (${scopeIds.map(() => '?').join(', ')})`
+    )
+      .bind(...scopeIds)
+      .all<{ id: number }>()
+    const docIds = docRows.results.map((d) => d.id)
+
+    const docPh = docIds.length > 0 ? docIds.map(() => '?').join(', ') : 'NULL'
+    const scopePh = scopeIds.map(() => '?').join(', ')
+
+    ;[nodeRows, linkRows] = await Promise.all([
+      c.env.DB
+        .prepare(
+          `SELECT id, label, entity_type, preferred_translation
+           FROM extracted_entity
+           WHERE (source_document_id IN (${docPh}) AND scope = 'document')
+              OR (knowledge_scope_id IN (${scopePh}) AND scope = 'scope')`
+        )
+        .bind(...docIds, ...scopeIds)
+        .all<GraphNode>(),
+      c.env.DB
+        .prepare(
+          `SELECT er.id, er.from_entity_id AS source, er.to_entity_id AS target, er.edge_type, er.explanation
+           FROM extracted_relationship er
+           WHERE (er.source_document_id IN (${docPh}) AND er.scope = 'document')
+              OR (er.knowledge_scope_id IN (${scopePh}) AND er.scope = 'scope')`
+        )
+        .bind(...docIds, ...scopeIds)
+        .all<GraphLink>(),
+    ])
+  } else if (documentId && !isNaN(documentId)) {
+    ;[nodeRows, linkRows] = await Promise.all([
+      c.env.DB
+        .prepare(
+          `SELECT id, label, entity_type, preferred_translation
+           FROM extracted_entity
+           WHERE source_document_id = ? AND scope = 'document'`
+        )
+        .bind(documentId)
+        .all<GraphNode>(),
+      c.env.DB
+        .prepare(
+          `SELECT er.id, er.from_entity_id AS source, er.to_entity_id AS target, er.edge_type, er.explanation
+           FROM extracted_relationship er
+           WHERE er.source_document_id = ? AND er.scope = 'document'`
+        )
+        .bind(documentId)
+        .all<GraphLink>(),
+    ])
+  } else {
+    return c.json({ error: 'documentId or knowledgeScopeId is required' }, 400)
+  }
 
   const nodeIds = new Set(nodeRows.results.map((n) => n.id))
   const links = linkRows.results.filter((l) => nodeIds.has(l.source) && nodeIds.has(l.target))
 
   return c.json({ nodes: nodeRows.results, links })
 })
+
+interface GraphNode {
+  id: number
+  label: string | null
+  entity_type: string
+  preferred_translation: string | null
+}
+
+interface GraphLink {
+  id: number
+  source: number
+  target: number
+  edge_type: string
+  explanation: string | null
+}
 
 // POST /api/knowledge/document-entity-summary
 //

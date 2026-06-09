@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, watch, onMounted, nextTick } from 'vue'
+import { ref, computed, watch, onMounted, nextTick } from 'vue'
 import * as d3 from 'd3'
 
 interface DocumentItem {
@@ -28,11 +28,26 @@ interface GraphLink {
   explanation: string | null
 }
 
+interface ScopeNode {
+  id: number
+  name: string
+  parentId: number | null
+  children: ScopeNode[]
+}
+
+interface ScopeOption {
+  id: number
+  display: string
+}
+
 const svgRef = ref<SVGSVGElement | null>(null)
 const loading = ref(false)
 const error = ref<string | null>(null)
 const documents = ref<DocumentItem[]>([])
 const selectedDocId = ref<number | null>(null)
+const scopeOptions = ref<ScopeOption[]>([])
+const selectedScopeId = ref<number | null>(null)
+const mode = ref<'document' | 'scope'>('document')
 const isEmpty = ref(false)
 
 const tooltip = ref({
@@ -42,25 +57,41 @@ const tooltip = ref({
   lines: [] as string[],
 })
 
+function flattenScopes(nodes: ScopeNode[], depth: number, out: ScopeOption[]) {
+  for (const node of nodes) {
+    out.push({ id: node.id, display: `${'  '.repeat(depth)}${node.name}` })
+    flattenScopes(node.children, depth + 1, out)
+  }
+}
+
 onMounted(async () => {
   try {
-    const res = await fetch('/api/library/document?limit=100')
-    if (!res.ok) throw new Error(`HTTP ${res.status}`)
-    const data = (await res.json()) as { documents: DocumentItem[] }
-    documents.value = data.documents
+    const [docRes, scopeRes] = await Promise.all([
+      fetch('/api/library/document?limit=100'),
+      fetch('/api/knowledge-scope'),
+    ])
+    if (!docRes.ok) throw new Error(`HTTP ${docRes.status}`)
+    const docData = (await docRes.json()) as { documents: DocumentItem[] }
+    documents.value = docData.documents
+
+    if (scopeRes.ok) {
+      const scopeData = (await scopeRes.json()) as { tree: ScopeNode[] }
+      const flat: ScopeOption[] = []
+      flattenScopes(scopeData.tree, 0, flat)
+      scopeOptions.value = flat
+    }
   } catch (e) {
     error.value = e instanceof Error ? e.message : 'Failed to load documents'
   }
 })
 
-watch(selectedDocId, async (docId) => {
-  if (!docId) return
+async function loadGraph(query: string) {
   error.value = null
   isEmpty.value = false
   loading.value = true
 
   try {
-    const res = await fetch(`/api/knowledge/graph?documentId=${docId}`)
+    const res = await fetch(`/api/knowledge/graph?${query}`)
     if (!res.ok) throw new Error(`HTTP ${res.status}`)
     const data = (await res.json()) as { nodes: GraphNode[]; links: GraphLink[] }
 
@@ -78,7 +109,19 @@ watch(selectedDocId, async (docId) => {
     loading.value = false
     error.value = e instanceof Error ? e.message : 'Failed to load graph'
   }
+}
+
+watch([mode, selectedDocId, selectedScopeId], () => {
+  if (mode.value === 'document') {
+    if (selectedDocId.value) loadGraph(`documentId=${selectedDocId.value}`)
+  } else {
+    if (selectedScopeId.value) loadGraph(`knowledgeScopeId=${selectedScopeId.value}`)
+  }
 })
+
+const hasSelection = computed(() =>
+  mode.value === 'document' ? selectedDocId.value !== null : selectedScopeId.value !== null
+)
 
 function clearGraph() {
   if (!svgRef.value) return
@@ -216,7 +259,7 @@ function renderGraph(nodes: GraphNode[], links: GraphLink[]) {
 
 <template>
   <div class="kg-root">
-    <svg ref="svgRef" v-show="!loading && !error && !isEmpty && selectedDocId" class="kg-svg" />
+    <svg ref="svgRef" v-show="!loading && !error && !isEmpty && hasSelection" class="kg-svg" />
 
     <v-progress-circular v-if="loading" indeterminate class="kg-center" />
 
@@ -225,7 +268,20 @@ function renderGraph(nodes: GraphNode[], links: GraphLink[]) {
     <h1 class="text-h4 kg-heading">Knowledge Graph</h1>
 
     <div class="kg-controls">
+      <v-btn-toggle
+        v-model="mode"
+        mandatory
+        density="compact"
+        variant="outlined"
+        divided
+        class="mb-2"
+      >
+        <v-btn value="document" size="small">By document</v-btn>
+        <v-btn value="scope" size="small">By knowledge scope</v-btn>
+      </v-btn-toggle>
+
       <v-select
+        v-if="mode === 'document'"
         v-model="selectedDocId"
         :items="documents.map(d => ({ ...d, _display: d.title ?? d.original_doc_filename }))"
         item-title="_display"
@@ -236,13 +292,26 @@ function renderGraph(nodes: GraphNode[], links: GraphLink[]) {
         hide-details
         style="width: 280px"
       />
+      <v-select
+        v-else
+        v-model="selectedScopeId"
+        :items="scopeOptions"
+        item-title="display"
+        item-value="id"
+        label="Select knowledge scope"
+        density="compact"
+        variant="outlined"
+        hide-details
+        no-data-text="No knowledge scopes yet"
+        style="width: 280px"
+      />
     </div>
 
     <p v-if="isEmpty" class="text-body-2 text-medium-emphasis kg-center">
-      No entities found for this document.
+      No entities found for this {{ mode === 'document' ? 'document' : 'knowledge scope' }}.
     </p>
 
-    <p v-if="!loading && !error && !isEmpty && selectedDocId" class="text-caption text-medium-emphasis kg-hint">
+    <p v-if="!loading && !error && !isEmpty && hasSelection" class="text-caption text-medium-emphasis kg-hint">
       Scroll to zoom · Drag canvas to pan · Drag nodes to reposition
     </p>
 

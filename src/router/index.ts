@@ -35,6 +35,11 @@ const router = createRouter({
       component: () => import('../views/KnowledgeGraphView.vue'),
     },
     {
+      path: '/knowledge-scopes',
+      name: 'knowledge-scopes',
+      component: () => import('../views/KnowledgeScopesView.vue'),
+    },
+    {
       path: '/library',
       name: 'library',
       component: () => import('../views/LibraryView.vue'),

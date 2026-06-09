@@ -7,6 +7,57 @@ import { extractTermsFromText } from '../lib/text-terms'
 
 const libraryRoutes = new Hono<{ Bindings: Env }>()
 
+export interface FolderAffinityRow {
+  id: number
+  parent_id: number | null
+  knowledge_scope_id: number | null
+}
+
+// Pure nearest-ancestor walk: starting at folderId, climb the parent_id chain
+// and return the first non-null knowledge_scope_id. Cycle-safe.
+export function nearestAncestorAffinity(
+  folders: FolderAffinityRow[],
+  folderId: number | null
+): number | null {
+  if (folderId === null) return null
+
+  const byId = new Map(folders.map((r) => [r.id, r]))
+  const seen = new Set<number>()
+  let cursor: number | null = folderId
+  while (cursor !== null && !seen.has(cursor)) {
+    seen.add(cursor)
+    const folder = byId.get(cursor)
+    if (!folder) break
+    if (folder.knowledge_scope_id !== null) return folder.knowledge_scope_id
+    cursor = folder.parent_id
+  }
+  return null
+}
+
+// Document → knowledge-scope assignment is permanent: once a document has a
+// non-null scope, it cannot be re-pointed at a different scope or cleared.
+// Idempotent re-assert (same id) is fine.
+export function canAssignDocumentScope(
+  currentScopeId: number | null,
+  requestedScopeId: number | null
+): boolean {
+  if (currentScopeId === null) return true
+  return requestedScopeId === currentScopeId
+}
+
+// Resolve a folder's knowledge-scope affinity using nearest-ancestor inheritance.
+async function resolveFolderAffinity(
+  db: D1Database,
+  folderId: number | null
+): Promise<number | null> {
+  if (folderId === null) return null
+
+  const rows = await db
+    .prepare('SELECT id, parent_id, knowledge_scope_id FROM document_group')
+    .all<FolderAffinityRow>()
+  return nearestAncestorAffinity(rows.results, folderId)
+}
+
 // Get directory tree structure
 libraryRoutes.get('/', async (c) => {
   // Fetch all document groups
@@ -337,7 +388,8 @@ libraryRoutes.get('/document/:id', async (c) => {
       extracted_doc_location,
       extracted_doc_char_count,
       extracted_doc_unique_char_count,
-      parent_id
+      parent_id,
+      knowledge_scope_id
     FROM document WHERE id = ?`
   )
     .bind(id)
@@ -353,6 +405,7 @@ libraryRoutes.get('/document/:id', async (c) => {
       extracted_doc_char_count: number
       extracted_doc_unique_char_count: number
       parent_id: number | null
+      knowledge_scope_id: number | null
     }>()
 
   if (!doc) {
@@ -658,6 +711,7 @@ libraryRoutes.get('/document/:id', async (c) => {
     charCount: doc.extracted_doc_char_count,
     uniqueCharCount: doc.extracted_doc_unique_char_count,
     parentId: doc.parent_id,
+    knowledgeScopeId: doc.knowledge_scope_id,
     extractedContent,
     entities,
     chunks,
@@ -834,12 +888,13 @@ libraryRoutes.get('/document/:id/original', async (c) => {
 // List all folders
 libraryRoutes.get('/folder', async (c) => {
   const result = await c.env.DB.prepare(
-    'SELECT id, name, parent_id, group_type FROM document_group ORDER BY name'
+    'SELECT id, name, parent_id, group_type, knowledge_scope_id FROM document_group ORDER BY name'
   ).all<{
     id: number
     name: string
     parent_id: number | null
     group_type: string
+    knowledge_scope_id: number | null
   }>()
 
   const folders = result.results.map((f) => ({
@@ -847,6 +902,7 @@ libraryRoutes.get('/folder', async (c) => {
     name: f.name,
     parentId: f.parent_id,
     groupType: f.group_type,
+    knowledgeScopeId: f.knowledge_scope_id,
   }))
 
   return c.json({ folders })
@@ -854,7 +910,11 @@ libraryRoutes.get('/folder', async (c) => {
 
 // Create a new folder
 libraryRoutes.post('/folder', async (c) => {
-  const body = await c.req.json<{ name: string; groupType: string }>()
+  const body = await c.req.json<{
+    name: string
+    groupType: string
+    knowledgeScopeId?: number | null
+  }>()
 
   if (!body.name || body.name.trim() === '') {
     return c.json({ error: 'Folder name is required' }, 400)
@@ -865,17 +925,28 @@ libraryRoutes.post('/folder', async (c) => {
     return c.json({ error: `Invalid folder type. Must be one of: ${validTypes.join(', ')}` }, 400)
   }
 
+  const knowledgeScopeId = body.knowledgeScopeId ?? null
+  if (knowledgeScopeId !== null) {
+    const scope = await c.env.DB.prepare('SELECT id FROM knowledge_scope WHERE id = ?')
+      .bind(knowledgeScopeId)
+      .first()
+    if (!scope) return c.json({ error: 'Knowledge scope not found' }, 404)
+  }
+
   const result = await c.env.DB.prepare(
-    'INSERT INTO document_group (name, parent_id, group_type) VALUES (?, NULL, ?) RETURNING id'
+    'INSERT INTO document_group (name, parent_id, group_type, knowledge_scope_id) VALUES (?, NULL, ?, ?) RETURNING id'
   )
-    .bind(body.name.trim(), body.groupType)
+    .bind(body.name.trim(), body.groupType, knowledgeScopeId)
     .first<{ id: number }>()
 
   if (!result) {
     return c.json({ error: 'Failed to create folder' }, 500)
   }
 
-  return c.json({ id: result.id, name: body.name.trim(), groupType: body.groupType }, 201)
+  return c.json(
+    { id: result.id, name: body.name.trim(), groupType: body.groupType, knowledgeScopeId },
+    201
+  )
 })
 
 // Rename folder
@@ -885,11 +956,7 @@ libraryRoutes.patch('/folder/:id', async (c) => {
     return c.json({ error: 'Invalid folder ID' }, 400)
   }
 
-  const body = await c.req.json<{ name: string }>()
-
-  if (!body.name || body.name.trim() === '') {
-    return c.json({ error: 'Folder name is required' }, 400)
-  }
+  const body = await c.req.json<{ name?: string; knowledgeScopeId?: number | null }>()
 
   const folder = await c.env.DB.prepare('SELECT id FROM document_group WHERE id = ?')
     .bind(id)
@@ -899,11 +966,28 @@ libraryRoutes.patch('/folder/:id', async (c) => {
     return c.json({ error: 'Folder not found' }, 404)
   }
 
-  await c.env.DB.prepare('UPDATE document_group SET name = ? WHERE id = ?')
-    .bind(body.name.trim(), id)
-    .run()
+  if (body.name !== undefined) {
+    if (body.name.trim() === '') {
+      return c.json({ error: 'Folder name is required' }, 400)
+    }
+    await c.env.DB.prepare('UPDATE document_group SET name = ? WHERE id = ?')
+      .bind(body.name.trim(), id)
+      .run()
+  }
 
-  return c.json({ success: true, name: body.name.trim() })
+  if (body.knowledgeScopeId !== undefined) {
+    if (body.knowledgeScopeId !== null) {
+      const scope = await c.env.DB.prepare('SELECT id FROM knowledge_scope WHERE id = ?')
+        .bind(body.knowledgeScopeId)
+        .first()
+      if (!scope) return c.json({ error: 'Knowledge scope not found' }, 404)
+    }
+    await c.env.DB.prepare('UPDATE document_group SET knowledge_scope_id = ? WHERE id = ?')
+      .bind(body.knowledgeScopeId, id)
+      .run()
+  }
+
+  return c.json({ success: true })
 })
 
 // Move document to folder
@@ -913,34 +997,74 @@ libraryRoutes.patch('/document/:id', async (c) => {
     return c.json({ error: 'Invalid document ID' }, 400)
   }
 
-  const body = await c.req.json<{ folderId: number | null }>()
+  const body = await c.req.json<{ folderId?: number | null; knowledgeScopeId?: number | null }>()
 
   // Verify document exists
-  const doc = await c.env.DB.prepare('SELECT id FROM document WHERE id = ?')
+  const doc = await c.env.DB.prepare(
+    'SELECT id, knowledge_scope_id FROM document WHERE id = ?'
+  )
     .bind(id)
-    .first()
+    .first<{ id: number; knowledge_scope_id: number | null }>()
 
   if (!doc) {
     return c.json({ error: 'Document not found' }, 404)
   }
 
-  // Verify folder exists if provided
-  if (body.folderId !== null) {
-    const folder = await c.env.DB.prepare('SELECT id FROM document_group WHERE id = ?')
-      .bind(body.folderId)
-      .first()
+  // Move between folders (organization) — independent of knowledge scope.
+  if (body.folderId !== undefined) {
+    if (body.folderId !== null) {
+      const folder = await c.env.DB.prepare('SELECT id FROM document_group WHERE id = ?')
+        .bind(body.folderId)
+        .first()
+      if (!folder) {
+        return c.json({ error: 'Folder not found' }, 404)
+      }
+    }
+    await c.env.DB.prepare('UPDATE document SET parent_id = ? WHERE id = ?')
+      .bind(body.folderId, id)
+      .run()
 
-    if (!folder) {
-      return c.json({ error: 'Folder not found' }, 404)
+    // Apply the destination folder's knowledge-scope affinity when the document
+    // has no scope yet and the caller didn't set one explicitly in this request.
+    if (
+      body.folderId !== null &&
+      doc.knowledge_scope_id === null &&
+      body.knowledgeScopeId === undefined
+    ) {
+      const affinity = await resolveFolderAffinity(c.env.DB, body.folderId)
+      if (affinity !== null) {
+        await c.env.DB.prepare('UPDATE document SET knowledge_scope_id = ? WHERE id = ?')
+          .bind(affinity, id)
+          .run()
+      }
     }
   }
 
-  // Update document's folder
-  await c.env.DB.prepare('UPDATE document SET parent_id = ? WHERE id = ?')
-    .bind(body.folderId, id)
-    .run()
+  // Assign to a knowledge scope (entity universe) — independent of folder.
+  // Once set, the assignment is permanent (changing or clearing is rejected).
+  if (body.knowledgeScopeId !== undefined) {
+    if (!canAssignDocumentScope(doc.knowledge_scope_id, body.knowledgeScopeId ?? null)) {
+      return c.json(
+        { error: 'Document knowledge scope is permanent and cannot be changed' },
+        409
+      )
+    }
+    if (body.knowledgeScopeId !== null) {
+      const scope = await c.env.DB.prepare('SELECT id FROM knowledge_scope WHERE id = ?')
+        .bind(body.knowledgeScopeId)
+        .first()
+      if (!scope) {
+        return c.json({ error: 'Knowledge scope not found' }, 404)
+      }
+    }
+    if (body.knowledgeScopeId !== doc.knowledge_scope_id) {
+      await c.env.DB.prepare('UPDATE document SET knowledge_scope_id = ? WHERE id = ?')
+        .bind(body.knowledgeScopeId, id)
+        .run()
+    }
+  }
 
-  return c.json({ success: true, parentId: body.folderId })
+  return c.json({ success: true })
 })
 
 libraryRoutes.post('/document', async (c) => {
@@ -974,6 +1098,10 @@ libraryRoutes.post('/document', async (c) => {
     })
   }
 
+  // A document uploaded into a folder inherits that folder's nearest-ancestor
+  // knowledge-scope affinity (it has no scope of its own yet).
+  const knowledgeScopeId = await resolveFolderAffinity(c.env.DB, folderId)
+
   // Kick off the ingestion workflow for new documents
   const instance = await c.env.INGEST_DOCUMENT_WORKFLOW.create({
     params: {
@@ -983,6 +1111,7 @@ libraryRoutes.post('/document', async (c) => {
       contentHash: fileInfo.contentHash,
       dateUploaded: new Date().toISOString(),
       parentId: folderId,
+      knowledgeScopeId,
     },
   })
 

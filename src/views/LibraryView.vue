@@ -26,6 +26,7 @@ interface Folder {
   name: string
   parentId: number | null
   groupType: string
+  knowledgeScopeId: number | null
 }
 
 const documents = ref<Document[]>([])
@@ -51,6 +52,7 @@ const openFolders = ref<string[]>([])
 const createFolderDialog = ref(false)
 const newFolderName = ref('')
 const newFolderType = ref<string>('collection')
+const newFolderScopeId = ref<number | null>(null)
 const folderTypes = [
   { title: 'Book', value: 'book' },
   { title: 'Series', value: 'series' },
@@ -67,6 +69,24 @@ const selectedFolderId = ref<number | null>(null)
 const movingDocument = ref(false)
 const moveError = ref<string | null>(null)
 
+// Assign to knowledge scope dialog
+interface ScopeOption {
+  id: number
+  display: string
+}
+const assignScopeDialog = ref(false)
+const scopeOptions = ref<ScopeOption[]>([])
+const selectedScopeId = ref<number | null>(null)
+const initialScopeId = ref<number | null>(null)
+const assigningScope = ref(false)
+const assignScopeError = ref<string | null>(null)
+const scopeIsPermanent = computed(() => initialScopeId.value !== null)
+const currentScopeLabel = computed(() => {
+  const id = initialScopeId.value
+  if (id === null) return ''
+  return scopeOptions.value.find((s) => s.id === id)?.display.trim() ?? `Scope #${id}`
+})
+
 // Context menu state
 const contextMenu = ref(false)
 const contextMenuX = ref(0)
@@ -76,6 +96,7 @@ const contextMenuTarget = ref<TreeNode | null>(null)
 // Rename folder dialog
 const renameFolderDialog = ref(false)
 const renameFolderName = ref('')
+const renameFolderScopeId = ref<number | null>(null)
 const renamingFolder = ref(false)
 const renameFolderError = ref<string | null>(null)
 
@@ -132,6 +153,15 @@ async function fetchDirectoryTree() {
   }
 }
 
+async function openCreateFolderDialog() {
+  newFolderName.value = ''
+  newFolderType.value = 'collection'
+  newFolderScopeId.value = null
+  createFolderError.value = null
+  await fetchScopes()
+  createFolderDialog.value = true
+}
+
 async function createFolder() {
   if (!newFolderName.value.trim()) {
     createFolderError.value = 'Folder name is required'
@@ -148,6 +178,7 @@ async function createFolder() {
       body: JSON.stringify({
         name: newFolderName.value.trim(),
         groupType: newFolderType.value,
+        knowledgeScopeId: newFolderScopeId.value,
       }),
     })
 
@@ -159,6 +190,7 @@ async function createFolder() {
     createFolderDialog.value = false
     newFolderName.value = ''
     newFolderType.value = 'collection'
+    newFolderScopeId.value = null
     await fetchDirectoryTree()
   } catch (err) {
     createFolderError.value = err instanceof Error ? err.message : 'Failed to create folder'
@@ -225,14 +257,16 @@ function openContextMenu(event: MouseEvent, item: TreeNode) {
   contextMenu.value = true
 }
 
-function openRenameFolderDialog() {
+async function openRenameFolderDialog() {
   if (!contextMenuTarget.value || contextMenuTarget.value.type !== 'folder') return
   const folderId = parseInt(contextMenuTarget.value.id.replace('group-', ''), 10)
+  renameFolderError.value = null
+  contextMenu.value = false
+  await Promise.all([fetchScopes(), fetchFolders()])
   const folder = folders.value.find((f) => f.id === folderId)
   renameFolderName.value = folder?.name || contextMenuTarget.value.name
-  renameFolderError.value = null
+  renameFolderScopeId.value = folder?.knowledgeScopeId ?? null
   renameFolderDialog.value = true
-  contextMenu.value = false
 }
 
 async function renameFolder() {
@@ -251,7 +285,10 @@ async function renameFolder() {
     const response = await fetch(`/api/library/folder/${folderId}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name: renameFolderName.value.trim() }),
+      body: JSON.stringify({
+        name: renameFolderName.value.trim(),
+        knowledgeScopeId: renameFolderScopeId.value,
+      }),
     })
 
     if (!response.ok) {
@@ -341,6 +378,90 @@ function moveTreeDocument() {
     extracted_doc_unique_char_count: 0,
   }
   openMoveDialog(doc)
+  contextMenu.value = false
+}
+
+function flattenScopeTree(
+  nodes: { id: number; name: string; children: typeof nodes }[],
+  depth: number,
+  out: ScopeOption[],
+) {
+  for (const node of nodes) {
+    out.push({ id: node.id, display: `${'  '.repeat(depth)}${node.name}` })
+    flattenScopeTree(node.children, depth + 1, out)
+  }
+}
+
+async function fetchScopes() {
+  try {
+    const res = await fetch('/api/knowledge-scope')
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    const data = (await res.json()) as {
+      tree: { id: number; name: string; children: never[] }[]
+    }
+    const flat: ScopeOption[] = []
+    flattenScopeTree(data.tree, 0, flat)
+    scopeOptions.value = flat
+  } catch (err) {
+    console.error('Failed to fetch knowledge scopes:', err)
+  }
+}
+
+async function openAssignScopeDialog(doc: Document) {
+  selectedDocument.value = doc
+  selectedScopeId.value = null
+  initialScopeId.value = null
+  assignScopeError.value = null
+  await fetchScopes()
+  // Prefill with the document's current scope, if any.
+  try {
+    const res = await fetch(`/api/library/document/${doc.id}`)
+    if (res.ok) {
+      const data = (await res.json()) as { knowledgeScopeId: number | null }
+      selectedScopeId.value = data.knowledgeScopeId
+      initialScopeId.value = data.knowledgeScopeId
+    }
+  } catch {
+    // non-fatal
+  }
+  assignScopeDialog.value = true
+}
+
+async function assignDocumentToScope() {
+  if (!selectedDocument.value) return
+  assigningScope.value = true
+  assignScopeError.value = null
+  try {
+    const res = await fetch(`/api/library/document/${selectedDocument.value.id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ knowledgeScopeId: selectedScopeId.value }),
+    })
+    if (!res.ok) {
+      const data = (await res.json().catch(() => ({}))) as { error?: string }
+      throw new Error(data.error || 'Failed to assign scope')
+    }
+    assignScopeDialog.value = false
+    selectedDocument.value = null
+  } catch (err) {
+    assignScopeError.value = err instanceof Error ? err.message : 'Failed to assign scope'
+  } finally {
+    assigningScope.value = false
+  }
+}
+
+function assignTreeDocumentScope() {
+  if (!contextMenuTarget.value || contextMenuTarget.value.type !== 'document') return
+  const doc: Document = {
+    id: contextMenuTarget.value.documentId!,
+    original_doc_filename: contextMenuTarget.value.name,
+    original_doc_mimetype: '',
+    date_uploaded: '',
+    date_last_accessed: null,
+    extracted_doc_char_count: contextMenuTarget.value.charCount || 0,
+    extracted_doc_unique_char_count: 0,
+  }
+  openAssignScopeDialog(doc)
   contextMenu.value = false
 }
 
@@ -450,7 +571,7 @@ async function handleFileUpload(event: Event) {
         <v-btn
           variant="outlined"
           prepend-icon="mdi-folder-plus"
-          @click="createFolderDialog = true"
+          @click="openCreateFolderDialog"
         >
           Create Folder
         </v-btn>
@@ -584,6 +705,13 @@ async function handleFileUpload(event: Event) {
             @click="openMoveDialog(item)"
           />
           <v-btn
+            icon="mdi-layers-triple-outline"
+            size="small"
+            variant="text"
+            title="Assign to knowledge scope"
+            @click="openAssignScopeDialog(item)"
+          />
+          <v-btn
             icon="mdi-download"
             size="small"
             variant="text"
@@ -615,7 +743,23 @@ async function handleFileUpload(event: Event) {
             :items="folderTypes"
             label="Folder Type"
             variant="outlined"
+            class="mb-4"
           />
+          <v-autocomplete
+            v-model="newFolderScopeId"
+            :items="scopeOptions"
+            item-title="display"
+            item-value="id"
+            label="Knowledge scope affinity (optional)"
+            variant="outlined"
+            clearable
+            placeholder="None"
+            no-data-text="No knowledge scopes yet — create one in Knowledge Scopes"
+          />
+          <p class="text-caption text-medium-emphasis">
+            Documents added to this folder without a scope of their own inherit this scope (nearest
+            ancestor folder wins).
+          </p>
         </v-card-text>
         <v-card-actions>
           <v-spacer />
@@ -677,10 +821,67 @@ async function handleFileUpload(event: Event) {
       </v-card>
     </v-dialog>
 
+    <!-- Assign to Knowledge Scope Dialog -->
+    <v-dialog v-model="assignScopeDialog" max-width="420">
+      <v-card>
+        <v-card-title>Assign to Knowledge Scope</v-card-title>
+        <v-card-text>
+          <v-alert v-if="assignScopeError" type="error" density="compact" class="mb-4">
+            {{ assignScopeError }}
+          </v-alert>
+          <p v-if="selectedDocument" class="text-body-2 mb-2">
+            Document: <strong>{{ selectedDocument.original_doc_filename }}</strong>
+          </p>
+          <p class="text-caption text-medium-emphasis mb-4">
+            The universe in which this document's entities and relationships are valid. Independent
+            of its folder.
+          </p>
+          <template v-if="scopeIsPermanent">
+            <v-text-field
+              :model-value="currentScopeLabel"
+              label="Knowledge scope"
+              variant="outlined"
+              readonly
+            />
+            <p class="text-caption text-medium-emphasis">
+              Knowledge scope is permanent once set and cannot be changed.
+            </p>
+          </template>
+          <v-autocomplete
+            v-else
+            v-model="selectedScopeId"
+            :items="scopeOptions"
+            item-title="display"
+            item-value="id"
+            label="Select knowledge scope"
+            variant="outlined"
+            clearable
+            placeholder="No scope (document only)"
+            no-data-text="No knowledge scopes yet — create one in Knowledge Scopes"
+          />
+        </v-card-text>
+        <v-card-actions>
+          <v-spacer />
+          <v-btn variant="text" @click="assignScopeDialog = false">
+            {{ scopeIsPermanent ? 'Close' : 'Cancel' }}
+          </v-btn>
+          <v-btn
+            v-if="!scopeIsPermanent"
+            color="primary"
+            variant="flat"
+            :loading="assigningScope"
+            @click="assignDocumentToScope"
+          >
+            Save
+          </v-btn>
+        </v-card-actions>
+      </v-card>
+    </v-dialog>
+
     <!-- Rename Folder Dialog -->
     <v-dialog v-model="renameFolderDialog" max-width="400">
       <v-card>
-        <v-card-title>Rename Folder</v-card-title>
+        <v-card-title>Edit Folder</v-card-title>
         <v-card-text>
           <v-alert v-if="renameFolderError" type="error" density="compact" class="mb-4">
             {{ renameFolderError }}
@@ -690,8 +891,24 @@ async function handleFileUpload(event: Event) {
             label="Folder Name"
             variant="outlined"
             autofocus
+            class="mb-4"
             @keyup.enter="renameFolder"
           />
+          <v-autocomplete
+            v-model="renameFolderScopeId"
+            :items="scopeOptions"
+            item-title="display"
+            item-value="id"
+            label="Knowledge scope affinity (optional)"
+            variant="outlined"
+            clearable
+            placeholder="None"
+            no-data-text="No knowledge scopes yet — create one in Knowledge Scopes"
+          />
+          <p class="text-caption text-medium-emphasis">
+            Documents added to this folder without a scope of their own inherit this scope (nearest
+            ancestor folder wins).
+          </p>
         </v-card-text>
         <v-card-actions>
           <v-spacer />
@@ -702,7 +919,7 @@ async function handleFileUpload(event: Event) {
             :loading="renamingFolder"
             @click="renameFolder"
           >
-            Rename
+            Save
           </v-btn>
         </v-card-actions>
       </v-card>
@@ -720,12 +937,15 @@ async function handleFileUpload(event: Event) {
             <v-list-item-title>Upload to Folder</v-list-item-title>
           </v-list-item>
           <v-list-item prepend-icon="mdi-pencil" @click="openRenameFolderDialog">
-            <v-list-item-title>Rename Folder</v-list-item-title>
+            <v-list-item-title>Edit Folder</v-list-item-title>
           </v-list-item>
         </template>
         <template v-else-if="contextMenuTarget?.type === 'document'">
           <v-list-item prepend-icon="mdi-folder-move" @click="moveTreeDocument">
             <v-list-item-title>Move to Folder</v-list-item-title>
+          </v-list-item>
+          <v-list-item prepend-icon="mdi-layers-triple-outline" @click="assignTreeDocumentScope">
+            <v-list-item-title>Assign to Knowledge Scope</v-list-item-title>
           </v-list-item>
           <v-list-item prepend-icon="mdi-download" @click="downloadTreeDocument">
             <v-list-item-title>Download</v-list-item-title>

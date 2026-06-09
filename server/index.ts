@@ -5,6 +5,7 @@ import libraryVisualizationRoutes from './routes/library-visualization'
 import graphTypeRoutes from './routes/graph-types'
 import dictionaryRoutes from './routes/dictionary'
 import knowledgeRoutes from './routes/knowledge'
+import knowledgeScopeRoutes from './routes/knowledge-scope'
 import authRoutes from './routes/auth'
 import preferencesRoutes from './routes/preferences'
 
@@ -23,6 +24,7 @@ app.route('/api/library/visualization', libraryVisualizationRoutes)
 app.route('/api/graph-types', graphTypeRoutes)
 app.route('/api/dictionary', dictionaryRoutes)
 app.route('/api/knowledge', knowledgeRoutes)
+app.route('/api/knowledge-scope', knowledgeScopeRoutes)
 app.route('/api/preferences', preferencesRoutes)
 
 export default app
