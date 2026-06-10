@@ -8,11 +8,34 @@ import PreferencesDialog from './components/PreferencesDialog.vue'
 const drawer = ref(true)
 const prefsOpen = ref(false)
 
-const { userType, displayName, expiresIn, fetchUser, login, logout, createTestAccount } = useUser()
+const {
+  userType,
+  displayName,
+  expiresIn,
+  fetchUser,
+  login: loginUser,
+  logout: logoutUser,
+  createTestAccount: createTestAccountUser,
+} = useUser()
 const { fetchPreferences } = usePreferences()
 
 const selectedAccount = ref<string>('alice')
 const accountMenuOpen = ref(false)
+
+function login(account: string) {
+  accountMenuOpen.value = false
+  return loginUser(account)
+}
+
+function logout() {
+  accountMenuOpen.value = false
+  return logoutUser()
+}
+
+function createTestAccount() {
+  accountMenuOpen.value = false
+  return createTestAccountUser()
+}
 
 const userSubtitle = computed(() => {
   if (userType.value === 'test' && expiresIn.value)
@@ -55,7 +78,7 @@ const navItems = [
           :subtitle="userSubtitle"
         >
           <template #append>
-            <v-menu v-model="accountMenuOpen" location="bottom end">
+            <v-menu v-model="accountMenuOpen" location="bottom end" :close-on-content-click="false">
               <template #activator="{ props }">
                 <v-btn icon="mdi-dots-vertical" variant="text" size="small" v-bind="props" />
               </template>
