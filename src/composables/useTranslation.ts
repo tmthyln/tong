@@ -152,6 +152,10 @@ export function useTranslation(
     if (val) initTranslations()
   })
 
+  watch(document, doc => {
+    if (doc && translationMode.value) initTranslations()
+  })
+
   onUnmounted(() => {
     for (const timer of Object.values(saveTimers.value)) clearTimeout(timer)
   })
