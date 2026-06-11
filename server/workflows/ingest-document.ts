@@ -9,11 +9,24 @@ import {
   translateChunkInitialDraft,
   translateChunkRevision,
 } from '../lib/translation'
-import { extractEntitiesForNodeTypes, deduplicateEntitiesLLM } from '../lib/entity-extraction'
+import {
+  extractEntitiesForNodeTypes,
+  deduplicateEntitiesLLM,
+  ENTITY_EXTRACTION_MODEL,
+} from '../lib/entity-extraction'
 import type { NodeTypeInput, ExtractedEntity } from '../lib/entity-extraction'
-import { extractRelationshipsForEdgeType } from '../lib/relationship-extraction'
+import {
+  extractRelationshipsForEdgeType,
+  RELATIONSHIP_EXTRACTION_MODEL,
+} from '../lib/relationship-extraction'
 import type { EdgeTypeInput, ExtractedRelationship } from '../lib/relationship-extraction'
-import { resolveDocumentCoreference } from '../lib/coreference'
+import { resolveDocumentCoreference, COREFERENCE_MODEL } from '../lib/coreference'
+import {
+  startEnrichmentRun,
+  completeEnrichmentRun,
+  failEnrichmentRun,
+  type OntologyRef,
+} from '../lib/enrichment-run'
 
 const LLM_STEP_RETRIES = { retries: { limit: 4, delay: '5 second', backoff: 'exponential' } } as const
 
@@ -30,6 +43,8 @@ interface IngestDocumentParams {
 interface EntityTypeContext {
   nodeTypes: NodeTypeInput[]
   edgeTypes: EdgeTypeInput[]
+  nodeOntology: OntologyRef[]
+  edgeOntology: OntologyRef[]
 }
 
 export class IngestDocumentWorkflow extends WorkflowEntrypoint<Env, IngestDocumentParams> {
@@ -169,15 +184,16 @@ export class IngestDocumentWorkflow extends WorkflowEntrypoint<Env, IngestDocume
       async (): Promise<EntityTypeContext> => {
         const [nodeTypesResult, edgeTypesResult] = await Promise.allSettled([
           this.env.DB.prepare(
-            'SELECT name, definition, examples_json FROM node_type WHERE is_current = 1 ORDER BY name'
-          ).all<{ name: string; definition: string; examples_json: string }>(),
+            'SELECT name, definition, examples_json, version FROM node_type WHERE is_current = 1 ORDER BY name'
+          ).all<{ name: string; definition: string; examples_json: string; version: number }>(),
           this.env.DB.prepare(
-            'SELECT name, reverse_name, definition, examples_json FROM edge_type WHERE is_current = 1 ORDER BY name'
+            'SELECT name, reverse_name, definition, examples_json, version FROM edge_type WHERE is_current = 1 ORDER BY name'
           ).all<{
             name: string
             reverse_name: string | null
             definition: string
             examples_json: string
+            version: number
           }>(),
         ])
 
@@ -205,6 +221,16 @@ export class IngestDocumentWorkflow extends WorkflowEntrypoint<Env, IngestDocume
             definition: t.definition,
             examples: parseExamples(t.examples_json),
           })),
+          nodeOntology: nodeTypesResult.value.results.map((t) => ({
+            kind: 'node' as const,
+            name: t.name,
+            version: t.version,
+          })),
+          edgeOntology: edgeTypesResult.value.results.map((t) => ({
+            kind: 'edge' as const,
+            name: t.name,
+            version: t.version,
+          })),
         }
       }
     )
@@ -219,7 +245,22 @@ export class IngestDocumentWorkflow extends WorkflowEntrypoint<Env, IngestDocume
     )
 
     // Phase 8: Extract entities, deduplicate, and persist — n(k + 3) steps (k = node types)
-    await Promise.allSettled(
+    const entityRunId = await step.do('enrichment-start-entity-extraction', async () =>
+      startEnrichmentRun(this.env.DB, {
+        documentId,
+        kind: 'entity_extraction',
+        model: ENTITY_EXTRACTION_MODEL,
+        params: {
+          temperature: 0,
+          max_completion_tokens: 1024,
+          response_format: 'json_object',
+          chunk_count: chunkIds.length,
+        },
+        ontology: entityTypeContext.nodeOntology,
+      })
+    )
+
+    const entityResults = await Promise.allSettled(
       chunkIds.map(async (chunkId) => {
         const chunkContent = await step.do(`load-chunk-content-${chunkId}`, async () => {
           const chunk = await this.env.DB.prepare('SELECT content FROM text_chunk WHERE id = ?')
@@ -277,13 +318,72 @@ export class IngestDocumentWorkflow extends WorkflowEntrypoint<Env, IngestDocume
       })
     )
 
+    // Close Phase 8 enrichment run
+    await step.do('enrichment-complete-entity-extraction', async () => {
+      const failed = entityResults.filter((r) => r.status === 'rejected').length
+      const totalEntitiesRow = await this.env.DB.prepare(
+        `SELECT COUNT(*) AS n FROM extracted_entity WHERE source_document_id = ? AND scope = 'chunk'`
+      )
+        .bind(documentId)
+        .first<{ n: number }>()
+      if (failed > 0) {
+        await failEnrichmentRun(
+          this.env.DB,
+          entityRunId,
+          `${failed} of ${entityResults.length} per-chunk extractions rejected`
+        )
+      } else {
+        await completeEnrichmentRun(this.env.DB, entityRunId, {
+          chunks_processed: entityResults.length,
+          chunks_failed: failed,
+          entities_inserted: totalEntitiesRow?.n ?? 0,
+          node_types: entityTypeContext.nodeTypes.length,
+        })
+      }
+    })
+
     // Phase 9: Document-wide coreference resolution — 1 step
     await step.do('coref-resolution', LLM_STEP_RETRIES, async () => {
-      await resolveDocumentCoreference(documentId, this.env)
+      const corefRunId = await startEnrichmentRun(this.env.DB, {
+        documentId,
+        kind: 'document_coreference',
+        model: COREFERENCE_MODEL,
+        params: { temperature: 0, max_tokens: 1024, response_format: 'json_object' },
+        ontology: entityTypeContext.nodeOntology,
+      })
+      try {
+        await resolveDocumentCoreference(documentId, this.env)
+        const docEntitiesRow = await this.env.DB.prepare(
+          `SELECT COUNT(*) AS n FROM extracted_entity WHERE source_document_id = ? AND scope = 'document'`
+        )
+          .bind(documentId)
+          .first<{ n: number }>()
+        await completeEnrichmentRun(this.env.DB, corefRunId, {
+          document_entities_created: docEntitiesRow?.n ?? 0,
+        })
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err)
+        await failEnrichmentRun(this.env.DB, corefRunId, msg)
+        throw err
+      }
     })
 
     // Phase 10: Sliding window relationship extraction — ⌈n/2⌉ · e + 1 steps (e = edge types)
     if (entityTypeContext.edgeTypes.length > 0) {
+      const relRunId = await step.do('enrichment-start-relationship-extraction', async () =>
+        startEnrichmentRun(this.env.DB, {
+          documentId,
+          kind: 'relationship_extraction',
+          model: RELATIONSHIP_EXTRACTION_MODEL,
+          params: {
+            temperature: 0,
+            max_tokens: 2048,
+            response_format: 'json_object',
+            window_size: 'sliding-3-chunks',
+          },
+          ontology: entityTypeContext.edgeOntology,
+        })
+      )
       interface WindowRelResult {
         centerIdx: number
         windowChunkIds: number[]
@@ -532,6 +632,22 @@ export class IngestDocumentWorkflow extends WorkflowEntrypoint<Env, IngestDocume
         console.log(
           `[ingest] Document ${documentId}: ${chunkRels.length} chunk-scope relationships, ${docRels.length} document-scope relationships`
         )
+      })
+
+      await step.do('enrichment-complete-relationship-extraction', async () => {
+        const counts = await this.env.DB.prepare(
+          `SELECT
+             SUM(CASE WHEN scope = 'chunk' THEN 1 ELSE 0 END) AS chunk_count,
+             SUM(CASE WHEN scope = 'document' THEN 1 ELSE 0 END) AS doc_count
+           FROM extracted_relationship WHERE source_document_id = ?`
+        )
+          .bind(documentId)
+          .first<{ chunk_count: number | null; doc_count: number | null }>()
+        await completeEnrichmentRun(this.env.DB, relRunId, {
+          chunk_relationships_inserted: counts?.chunk_count ?? 0,
+          document_relationships_inserted: counts?.doc_count ?? 0,
+          edge_types: entityTypeContext.edgeTypes.length,
+        })
       })
     }
 

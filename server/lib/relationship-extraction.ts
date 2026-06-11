@@ -14,7 +14,8 @@ export interface ExtractedRelationship {
   explanation: string
 }
 
-const MODEL = '@cf/meta/llama-3.3-70b-instruct-fp8-fast'
+export const RELATIONSHIP_EXTRACTION_MODEL = '@cf/meta/llama-3.3-70b-instruct-fp8-fast'
+const MODEL = RELATIONSHIP_EXTRACTION_MODEL
 type ModelOutput = AiModels[typeof MODEL]['postProcessedOutputs']
 
 /**

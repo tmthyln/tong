@@ -13,7 +13,8 @@ export interface ExtractedEntity {
 
 import { extractJsonObject } from './llm-utils'
 
-const MODEL = '@cf/moonshotai/kimi-k2.6' as keyof AiModels
+export const ENTITY_EXTRACTION_MODEL = '@cf/moonshotai/kimi-k2.6' as keyof AiModels
+const MODEL = ENTITY_EXTRACTION_MODEL
 interface ChatCompletionResponse {
   choices?: Array<{ message?: { content?: string }; finish_reason?: string }>
   usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number }

@@ -1,6 +1,7 @@
 import { extractJsonObject } from './llm-utils'
 
-const MODEL = '@cf/meta/llama-3.3-70b-instruct-fp8-fast'
+export const COREFERENCE_MODEL = '@cf/meta/llama-3.3-70b-instruct-fp8-fast'
+const MODEL = COREFERENCE_MODEL
 type ModelOutput = AiModels[typeof MODEL]['postProcessedOutputs']
 
 interface ChunkEntity {

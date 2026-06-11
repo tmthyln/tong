@@ -850,6 +850,56 @@ libraryRoutes.put('/chunk/:chunkId/translation', async (c) => {
   return c.json({ draftNumber, translator: userId, dateLastModified: now, created })
 })
 
+libraryRoutes.get('/document/:id/enrichments', async (c) => {
+  const id = parseInt(c.req.param('id'), 10)
+  if (isNaN(id)) return c.json({ error: 'Invalid document ID' }, 400)
+
+  const rows = await c.env.DB.prepare(
+    `SELECT id, kind, status, model, params_json, ontology_json,
+            result_summary_json, error, started_at, completed_at
+     FROM document_enrichment_run
+     WHERE document_id = ?
+     ORDER BY started_at DESC, id DESC`
+  )
+    .bind(id)
+    .all<{
+      id: number
+      kind: string
+      status: string
+      model: string | null
+      params_json: string
+      ontology_json: string
+      result_summary_json: string | null
+      error: string | null
+      started_at: string
+      completed_at: string | null
+    }>()
+
+  const parse = (s: string | null) => {
+    if (s === null) return null
+    try {
+      return JSON.parse(s)
+    } catch {
+      return null
+    }
+  }
+
+  return c.json({
+    enrichments: rows.results.map((r) => ({
+      id: r.id,
+      kind: r.kind,
+      status: r.status,
+      model: r.model,
+      params: parse(r.params_json),
+      ontology: parse(r.ontology_json),
+      resultSummary: parse(r.result_summary_json),
+      error: r.error,
+      startedAt: r.started_at,
+      completedAt: r.completed_at,
+    })),
+  })
+})
+
 libraryRoutes.get('/document/:id/original', async (c) => {
   const id = parseInt(c.req.param('id'), 10)
   if (isNaN(id)) {
