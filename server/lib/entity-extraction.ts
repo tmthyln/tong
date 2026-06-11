@@ -13,8 +13,25 @@ export interface ExtractedEntity {
 
 import { extractJsonObject } from './llm-utils'
 
-const MODEL = '@cf/meta/llama-3.3-70b-instruct-fp8-fast'
-type ModelOutput = AiModels[typeof MODEL]['postProcessedOutputs']
+const MODEL = '@cf/moonshotai/kimi-k2.6' as keyof AiModels
+interface ChatCompletionResponse {
+  choices?: Array<{ message?: { content?: string }; finish_reason?: string }>
+  usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number }
+}
+
+export interface ExtractOptions {
+  thinking?: boolean
+  maxCompletionTokens?: number
+}
+
+export interface NodeTypeExtractionRun {
+  nodeType: string
+  entities: ExtractedEntity[]
+  usage: { promptTokens: number; completionTokens: number; totalTokens: number }
+  finishReason: string | null
+  latencyMs: number
+  rawContent: string | null
+}
 
 /**
  * Extract entities for a subset of node types from a chunk of text.
@@ -24,20 +41,85 @@ type ModelOutput = AiModels[typeof MODEL]['postProcessedOutputs']
 export async function extractEntitiesForNodeTypes(
   chunkContent: string,
   nodeTypes: NodeTypeInput[],
-  env: Env
+  env: Env,
+  opts: ExtractOptions = {}
 ): Promise<ExtractedEntity[]> {
-  const allEntities: ExtractedEntity[] = []
+  const runs = await extractEntitiesForNodeTypesWithUsage(chunkContent, nodeTypes, env, opts)
+  return runs.flatMap(r => r.entities)
+}
 
-  for (const nodeType of nodeTypes) {
-    const messages = buildMessages(chunkContent, nodeType)
-
-    const result = await env.AI.run(MODEL, { messages, temperature: 0, max_tokens: 1024, response_format: { type: 'json_object' } })
-
-    const entities = parseResponse(result, chunkContent, nodeType.name)
-    allEntities.push(...entities)
+/**
+ * Same as extractEntitiesForNodeTypes but returns per-node-type usage, latency, and
+ * raw content so evaluation tooling can compare modes.
+ */
+async function runAiWithRetry(
+  env: Env,
+  args: Record<string, unknown>,
+  attempts = 3,
+): Promise<ChatCompletionResponse> {
+  let lastErr: unknown
+  for (let i = 0; i < attempts; i++) {
+    try {
+      return await (env.AI.run as (model: string, args: Record<string, unknown>) => Promise<unknown>)(MODEL, args) as ChatCompletionResponse
+    } catch (err) {
+      lastErr = err
+      if (i < attempts - 1) {
+        await new Promise(r => setTimeout(r, 1000 * Math.pow(2, i)))
+      }
+    }
   }
+  throw lastErr
+}
 
-  return allEntities
+export async function extractEntitiesForNodeTypesWithUsage(
+  chunkContent: string,
+  nodeTypes: NodeTypeInput[],
+  env: Env,
+  opts: ExtractOptions = {}
+): Promise<NodeTypeExtractionRun[]> {
+  const thinking = opts.thinking ?? false
+  const maxCompletionTokens = opts.maxCompletionTokens ?? 1024
+
+  return Promise.all(nodeTypes.map(async (nodeType): Promise<NodeTypeExtractionRun> => {
+    const messages = buildMessages(chunkContent, nodeType)
+    const start = Date.now()
+    let result: ChatCompletionResponse
+    try {
+      result = await runAiWithRetry(env, {
+        messages,
+        temperature: 0,
+        max_completion_tokens: maxCompletionTokens,
+        response_format: { type: 'json_object' },
+        chat_template_kwargs: { thinking },
+      })
+    } catch (err) {
+      const latencyMs = Date.now() - start
+      console.warn(`[entity-extraction] AI.run failed for ${nodeType.name} after retries:`, err)
+      return {
+        nodeType: nodeType.name,
+        entities: [],
+        usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+        finishReason: 'error',
+        latencyMs,
+        rawContent: null,
+      }
+    }
+    const latencyMs = Date.now() - start
+    const entities = parseResponse(result, chunkContent, nodeType.name)
+    const choice = result.choices?.[0]
+    return {
+      nodeType: nodeType.name,
+      entities,
+      usage: {
+        promptTokens: result.usage?.prompt_tokens ?? 0,
+        completionTokens: result.usage?.completion_tokens ?? 0,
+        totalTokens: result.usage?.total_tokens ?? 0,
+      },
+      finishReason: choice?.finish_reason ?? null,
+      latencyMs,
+      rawContent: choice?.message?.content ?? null,
+    }
+  }))
 }
 
 /**
@@ -82,31 +164,22 @@ Example response format: {"entities": [{"text": "北京"}, {"text": "上海"}]}`
 }
 
 function parseResponse(
-  result: ModelOutput,
+  result: ChatCompletionResponse,
   chunkContent: string,
   nodeTypeName: string
 ): ExtractedEntity[] {
-  if (typeof result === 'string') return []
-  // Handle different response formats
-  let parsed: { entities?: Array<{ text: string }> } | Array<{ text: string }> | null = null
+  const content = result.choices?.[0]?.message?.content
+  if (typeof content !== 'string') {
+    console.warn(`[entity-extraction] No content in response for ${nodeTypeName}, result:`, JSON.stringify(result))
+    return []
+  }
 
-  // Case 1: response is a string (parse as JSON)
-  if ('response' in result && typeof result.response === 'string') {
-    try {
-      parsed = JSON.parse(extractJsonObject(result.response))
-    } catch (err) {
-      console.warn(`[entity-extraction] JSON parse failed for ${nodeTypeName}:`, err)
-      console.warn(`[entity-extraction] Raw response: ${result.response}`)
-      return []
-    }
-  }
-  // Case 2: response is already an object/array
-  else if ('response' in result && result.response && typeof result.response === 'object') {
-    parsed = result.response as typeof parsed
-  }
-  // Case 3: no response
-  else {
-    console.warn(`[entity-extraction] No valid response for ${nodeTypeName}, result:`, JSON.stringify(result))
+  let parsed: { entities?: Array<{ text: string }> } | Array<{ text: string }> | null = null
+  try {
+    parsed = JSON.parse(extractJsonObject(content))
+  } catch (err) {
+    console.warn(`[entity-extraction] JSON parse failed for ${nodeTypeName}:`, err)
+    console.warn(`[entity-extraction] Raw content: ${content}`)
     return []
   }
 
@@ -217,18 +290,17 @@ Reply with JSON { "resolutions": [ { "text": "<exact text>", "nodeType": "<chose
         { role: 'user', content: userPrompt },
       ],
       temperature: 0,
-      max_tokens: 1024,
+      max_completion_tokens: 1024,
       response_format: { type: 'json_object' },
-    })
+      chat_template_kwargs: { thinking: false },
+    }) as ChatCompletionResponse
 
-    let parsed: { resolutions?: Array<{ text: string; nodeType: string }> } | null = null
-    if (typeof result !== 'string' && 'response' in result && typeof result.response === 'string') {
-      parsed = JSON.parse(extractJsonObject(result.response))
-    } else if (typeof result !== 'string' && 'response' in result && result.response && typeof result.response === 'object') {
-      parsed = result.response as typeof parsed
-    }
-    if (parsed?.resolutions && Array.isArray(parsed.resolutions)) {
-      resolved = parsed.resolutions
+    const content = result.choices?.[0]?.message?.content
+    if (typeof content === 'string') {
+      const parsed = JSON.parse(extractJsonObject(content)) as { resolutions?: Array<{ text: string; nodeType: string }> } | null
+      if (parsed?.resolutions && Array.isArray(parsed.resolutions)) {
+        resolved = parsed.resolutions
+      }
     }
   } catch (err) {
     console.warn('[entity-extraction] deduplicateEntitiesLLM LLM call failed, falling back to longest-span:', err)

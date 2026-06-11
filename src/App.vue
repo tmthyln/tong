@@ -54,12 +54,13 @@ const buildDate = __BUILD_DATE__
 
 const navItems = [
   { title: 'Home', icon: 'mdi-home', to: '/' },
-  { title: 'Document', icon: 'mdi-file-document-outline', to: '/document' },
+  { title: 'Documents', icon: 'mdi-file-document-outline', to: '/document' },
   { title: 'Dictionary', icon: 'mdi-book-alphabet', to: '/dictionary' },
   { title: 'Lexicon', icon: 'mdi-format-list-bulleted-type', to: '/lexicon' },
   { title: 'Knowledge Graph', icon: 'mdi-graph-outline', to: '/knowledge-graph' },
   { title: 'Knowledge Scopes', icon: 'mdi-layers-triple-outline', to: '/knowledge-scopes' },
   { title: 'Library', icon: 'mdi-bookshelf', to: '/library' },
+  { title: 'Evaluations', icon: 'mdi-test-tube', to: '/evaluations' },
   { title: 'Settings', icon: 'mdi-cog', to: '/settings' },
 ]
 </script>

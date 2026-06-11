@@ -8,6 +8,7 @@ import knowledgeRoutes from './routes/knowledge'
 import knowledgeScopeRoutes from './routes/knowledge-scope'
 import authRoutes from './routes/auth'
 import preferencesRoutes from './routes/preferences'
+import devEvalRoutes from './routes/dev-eval'
 
 export { IngestDocumentWorkflow } from './workflows/ingest-document'
 export { RefreshCedictWorkflow } from './workflows/refresh-cedict'
@@ -26,5 +27,6 @@ app.route('/api/dictionary', dictionaryRoutes)
 app.route('/api/knowledge', knowledgeRoutes)
 app.route('/api/knowledge-scope', knowledgeScopeRoutes)
 app.route('/api/preferences', preferencesRoutes)
+app.route('/api/dev/eval', devEvalRoutes)
 
 export default app
