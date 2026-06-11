@@ -5,6 +5,12 @@ import {
   type NodeTypeInput,
   type NodeTypeExtractionRun,
 } from '../lib/entity-extraction'
+import {
+  extractRelationshipsForEdgeTypeWithUsage,
+  RELATIONSHIP_EXTRACTION_MODEL,
+  type EdgeTypeInput,
+  type EdgeTypeExtractionRun,
+} from '../lib/relationship-extraction'
 
 const devEvalRoutes = new Hono<{ Bindings: Env }>()
 
@@ -123,6 +129,177 @@ devEvalRoutes.post('/entity-extraction/chunk', async (c) => {
     content: body.content,
     instant: summarize('instant', instantRuns),
     thinking: summarize('thinking', thinkingRuns),
+  }
+  return c.json(data)
+})
+
+// ── Relationship extraction evaluation ──────────────────────
+
+interface RelInitBody {
+  count?: number
+  chunkIds?: number[]
+  minEntities?: number
+}
+
+interface ChunkWithEntities {
+  id: number
+  content: string
+  entities: Array<{ nodeType: string; text: string }>
+}
+
+interface RelChunkBody {
+  chunkId: number
+  content: string
+  entities: Array<{ nodeType: string; text: string }>
+  edgeTypes: EdgeTypeInput[]
+  maxCompletionTokensThinking?: number
+  maxCompletionTokensInstant?: number
+}
+
+interface RelModeResult {
+  mode: 'thinking' | 'instant'
+  runs: EdgeTypeExtractionRun[]
+  totalRelationships: number
+  totalLatencyMs: number
+  totalPromptTokens: number
+  totalCompletionTokens: number
+  nullContentCount: number
+  lengthFinishCount: number
+}
+
+interface RelChunkResult {
+  chunkId: number
+  content: string
+  entities: Array<{ nodeType: string; text: string }>
+  thinking: RelModeResult
+  instant: RelModeResult
+}
+
+function summarizeRel(mode: 'thinking' | 'instant', runs: EdgeTypeExtractionRun[]): RelModeResult {
+  const allRels = runs.flatMap((r) => r.relationships)
+  return {
+    mode,
+    runs,
+    totalRelationships: allRels.length,
+    totalLatencyMs: runs.reduce((s, r) => s + r.latencyMs, 0),
+    totalPromptTokens: runs.reduce((s, r) => s + r.usage.promptTokens, 0),
+    totalCompletionTokens: runs.reduce((s, r) => s + r.usage.completionTokens, 0),
+    nullContentCount: runs.filter((r) => r.rawContent === null).length,
+    lengthFinishCount: runs.filter((r) => r.finishReason === 'length').length,
+  }
+}
+
+// Step 1: sample chunks that already have ≥minEntities extracted entities,
+// load their entities + the edge type ontology.
+devEvalRoutes.post('/relationship-extraction/init', async (c) => {
+  const body = (await c.req.json().catch(() => ({}))) as RelInitBody
+  const count = body.count ?? 8
+  const minEntities = body.minEntities ?? 2
+
+  let chunkIds: number[]
+  if (body.chunkIds && body.chunkIds.length > 0) {
+    chunkIds = body.chunkIds
+  } else {
+    // Pick chunks that have at least minEntities extracted chunk-scope entities.
+    const rows = await c.env.DB.prepare(
+      `SELECT source_chunk_id AS id FROM extracted_entity
+       WHERE scope = 'chunk' AND extracted_text IS NOT NULL
+       GROUP BY source_chunk_id
+       HAVING COUNT(*) >= ?
+       ORDER BY RANDOM()
+       LIMIT ?`
+    )
+      .bind(minEntities, count)
+      .all<{ id: number }>()
+    chunkIds = rows.results.map((r) => r.id)
+  }
+
+  if (chunkIds.length === 0) {
+    return c.json({ model: RELATIONSHIP_EXTRACTION_MODEL, chunks: [], edgeTypes: [] })
+  }
+
+  const placeholders = chunkIds.map(() => '?').join(',')
+  const [contentRows, entityRows, edgeTypeRows] = await Promise.all([
+    c.env.DB.prepare(`SELECT id, content FROM text_chunk WHERE id IN (${placeholders})`)
+      .bind(...chunkIds)
+      .all<{ id: number; content: string }>(),
+    c.env.DB.prepare(
+      `SELECT source_chunk_id, entity_type, extracted_text FROM extracted_entity
+       WHERE source_chunk_id IN (${placeholders}) AND scope = 'chunk' AND extracted_text IS NOT NULL`
+    )
+      .bind(...chunkIds)
+      .all<{ source_chunk_id: number; entity_type: string; extracted_text: string }>(),
+    c.env.DB.prepare(
+      'SELECT name, reverse_name, definition, examples_json FROM edge_type WHERE is_current = 1 ORDER BY name'
+    ).all<{
+      name: string
+      reverse_name: string | null
+      definition: string
+      examples_json: string
+    }>(),
+  ])
+
+  const parseExamples = (json: string): string[] => {
+    try {
+      const v = JSON.parse(json)
+      return Array.isArray(v) ? v.filter((s): s is string => typeof s === 'string') : []
+    } catch {
+      return []
+    }
+  }
+  const edgeTypes: EdgeTypeInput[] = edgeTypeRows.results.map((t) => ({
+    name: t.name,
+    reverseName: t.reverse_name,
+    definition: t.definition,
+    examples: parseExamples(t.examples_json),
+  }))
+
+  const entitiesByChunk = new Map<number, Array<{ nodeType: string; text: string }>>()
+  for (const e of entityRows.results) {
+    const arr = entitiesByChunk.get(e.source_chunk_id) ?? []
+    arr.push({ nodeType: e.entity_type, text: e.extracted_text })
+    entitiesByChunk.set(e.source_chunk_id, arr)
+  }
+
+  const chunks: ChunkWithEntities[] = contentRows.results.map((r) => ({
+    id: r.id,
+    content: r.content,
+    entities: entitiesByChunk.get(r.id) ?? [],
+  }))
+
+  return c.json({ model: RELATIONSHIP_EXTRACTION_MODEL, chunks, edgeTypes })
+})
+
+// Step 2: run one chunk's two modes (thinking vs instant) for all edge types.
+devEvalRoutes.post('/relationship-extraction/chunk', async (c) => {
+  const body = (await c.req.json()) as RelChunkBody
+  const maxTokThinking = body.maxCompletionTokensThinking ?? 8192
+  const maxTokInstant = body.maxCompletionTokensInstant ?? 2048
+
+  const runOne = (thinking: boolean, maxCompletionTokens: number) =>
+    Promise.all(
+      body.edgeTypes.map((edgeType) =>
+        extractRelationshipsForEdgeTypeWithUsage(
+          body.content,
+          body.entities,
+          edgeType,
+          c.env,
+          { thinking, maxCompletionTokens }
+        )
+      )
+    )
+
+  const [instantRuns, thinkingRuns] = await Promise.all([
+    runOne(false, maxTokInstant),
+    runOne(true, maxTokThinking),
+  ])
+
+  const data: RelChunkResult = {
+    chunkId: body.chunkId,
+    content: body.content,
+    entities: body.entities,
+    instant: summarizeRel('instant', instantRuns),
+    thinking: summarizeRel('thinking', thinkingRuns),
   }
   return c.json(data)
 })
