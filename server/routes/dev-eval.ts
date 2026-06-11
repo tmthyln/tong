@@ -76,26 +76,22 @@ devEvalRoutes.post('/entity-extraction/init', async (c) => {
     chunks = rows.results
   }
 
-  const [nodeTypesResult, nodeExamplesResult] = await Promise.all([
-    c.env.DB.prepare('SELECT id, name, definition FROM node_type ORDER BY name').all<{
-      id: number
-      name: string
-      definition: string
-    }>(),
-    c.env.DB.prepare(
-      'SELECT node_type_id, example FROM node_type_example ORDER BY id',
-    ).all<{ node_type_id: number; example: string }>(),
-  ])
+  const nodeTypesResult = await c.env.DB.prepare(
+    'SELECT name, definition, examples_json FROM node_type WHERE is_current = 1 ORDER BY name',
+  ).all<{ name: string; definition: string; examples_json: string }>()
 
-  const examplesByType: Record<number, string[]> = {}
-  for (const ex of nodeExamplesResult.results) {
-    if (!examplesByType[ex.node_type_id]) examplesByType[ex.node_type_id] = []
-    examplesByType[ex.node_type_id].push(ex.example)
+  const parseExamples = (json: string): string[] => {
+    try {
+      const v = JSON.parse(json)
+      return Array.isArray(v) ? v.filter((s): s is string => typeof s === 'string') : []
+    } catch {
+      return []
+    }
   }
-  const nodeTypes: NodeTypeInput[] = nodeTypesResult.results.map(t => ({
+  const nodeTypes: NodeTypeInput[] = nodeTypesResult.results.map((t) => ({
     name: t.name,
     definition: t.definition,
-    examples: examplesByType[t.id] ?? [],
+    examples: parseExamples(t.examples_json),
   }))
 
   return c.json({

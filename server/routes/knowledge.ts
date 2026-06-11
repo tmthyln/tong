@@ -408,7 +408,7 @@ async function extractAndPersistChunkRelationships(
 
   const ph = windowChunkIds.map(() => '?').join(', ')
 
-  const [contentRow, entityRows, edgeTypeRows, edgeExampleRows] = await Promise.all([
+  const [contentRow, entityRows, edgeTypeRows] = await Promise.all([
     env.DB.prepare(
       `SELECT GROUP_CONCAT(content, char(10)) AS window_content
        FROM (SELECT content FROM text_chunk WHERE id IN (${ph}) ORDER BY chunk_order)`
@@ -421,25 +421,28 @@ async function extractAndPersistChunkRelationships(
     )
       .bind(...windowChunkIds)
       .all<{ id: number; entity_type: string; extracted_text: string }>(),
-    env.DB.prepare('SELECT id, name, reverse_name, definition FROM edge_type ORDER BY name')
-      .all<{ id: number; name: string; reverse_name: string | null; definition: string }>(),
-    env.DB.prepare('SELECT edge_type_id, example FROM edge_type_example ORDER BY id')
-      .all<{ edge_type_id: number; example: string }>(),
+    env.DB.prepare(
+      'SELECT name, reverse_name, definition, examples_json FROM edge_type WHERE is_current = 1 ORDER BY name'
+    )
+      .all<{ name: string; reverse_name: string | null; definition: string; examples_json: string }>(),
   ])
 
   const windowContent = contentRow?.window_content ?? ''
   const entities = entityRows.results.map((r) => ({ nodeType: r.entity_type, text: r.extracted_text }))
 
-  const exByEdge: Record<number, string[]> = {}
-  for (const ex of edgeExampleRows.results) {
-    if (!exByEdge[ex.edge_type_id]) exByEdge[ex.edge_type_id] = []
-    exByEdge[ex.edge_type_id].push(ex.example)
+  const parseExamples = (json: string): string[] => {
+    try {
+      const v = JSON.parse(json)
+      return Array.isArray(v) ? v.filter((s): s is string => typeof s === 'string') : []
+    } catch {
+      return []
+    }
   }
   const edgeTypes: EdgeTypeInput[] = edgeTypeRows.results.map((et) => ({
     name: et.name,
     reverseName: et.reverse_name,
     definition: et.definition,
-    examples: exByEdge[et.id] ?? [],
+    examples: parseExamples(et.examples_json),
   }))
 
   if (edgeTypes.length === 0 || entities.length < 2) return

@@ -167,52 +167,43 @@ export class IngestDocumentWorkflow extends WorkflowEntrypoint<Env, IngestDocume
     const entityTypeContext = await step.do(
       'load-entity-type-definitions',
       async (): Promise<EntityTypeContext> => {
-        const [nodeTypesResult, nodeExamplesResult, edgeTypesResult, edgeExamplesResult] =
-          await Promise.allSettled([
-            this.env.DB.prepare('SELECT id, name, definition FROM node_type ORDER BY name').all<{
-              id: number
-              name: string
-              definition: string
-            }>(),
-            this.env.DB.prepare(
-              'SELECT node_type_id, example FROM node_type_example ORDER BY id'
-            ).all<{ node_type_id: number; example: string }>(),
-            this.env.DB.prepare(
-              'SELECT id, name, reverse_name, definition FROM edge_type ORDER BY name'
-            ).all<{ id: number; name: string; reverse_name: string | null; definition: string }>(),
-            this.env.DB.prepare(
-              'SELECT edge_type_id, example FROM edge_type_example ORDER BY id'
-            ).all<{ edge_type_id: number; example: string }>(),
-          ])
+        const [nodeTypesResult, edgeTypesResult] = await Promise.allSettled([
+          this.env.DB.prepare(
+            'SELECT name, definition, examples_json FROM node_type WHERE is_current = 1 ORDER BY name'
+          ).all<{ name: string; definition: string; examples_json: string }>(),
+          this.env.DB.prepare(
+            'SELECT name, reverse_name, definition, examples_json FROM edge_type WHERE is_current = 1 ORDER BY name'
+          ).all<{
+            name: string
+            reverse_name: string | null
+            definition: string
+            examples_json: string
+          }>(),
+        ])
 
         if (nodeTypesResult.status === 'rejected') throw new Error(`Failed to load node types: ${nodeTypesResult.reason}`)
-        if (nodeExamplesResult.status === 'rejected') throw new Error(`Failed to load node examples: ${nodeExamplesResult.reason}`)
         if (edgeTypesResult.status === 'rejected') throw new Error(`Failed to load edge types: ${edgeTypesResult.reason}`)
-        if (edgeExamplesResult.status === 'rejected') throw new Error(`Failed to load edge examples: ${edgeExamplesResult.reason}`)
 
-        const nodeExamplesByType: Record<number, string[]> = {}
-        for (const ex of nodeExamplesResult.value.results) {
-          if (!nodeExamplesByType[ex.node_type_id]) nodeExamplesByType[ex.node_type_id] = []
-          nodeExamplesByType[ex.node_type_id].push(ex.example)
-        }
-
-        const edgeExamplesByType: Record<number, string[]> = {}
-        for (const ex of edgeExamplesResult.value.results) {
-          if (!edgeExamplesByType[ex.edge_type_id]) edgeExamplesByType[ex.edge_type_id] = []
-          edgeExamplesByType[ex.edge_type_id].push(ex.example)
+        const parseExamples = (json: string): string[] => {
+          try {
+            const v = JSON.parse(json)
+            return Array.isArray(v) ? v.filter((s): s is string => typeof s === 'string') : []
+          } catch {
+            return []
+          }
         }
 
         return {
           nodeTypes: nodeTypesResult.value.results.map((t) => ({
             name: t.name,
             definition: t.definition,
-            examples: nodeExamplesByType[t.id] || [],
+            examples: parseExamples(t.examples_json),
           })),
           edgeTypes: edgeTypesResult.value.results.map((t) => ({
             name: t.name,
             reverseName: t.reverse_name,
             definition: t.definition,
-            examples: edgeExamplesByType[t.id] || [],
+            examples: parseExamples(t.examples_json),
           })),
         }
       }

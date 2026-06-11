@@ -1,16 +1,12 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted } from 'vue'
 
-interface TypeExample {
-  id: number
-  example: string
-}
-
 interface NodeType {
   id: number
   name: string
   definition: string
-  examples: TypeExample[]
+  examples: string[]
+  version: number
 }
 
 interface EdgeType {
@@ -18,7 +14,8 @@ interface EdgeType {
   name: string
   reverseName: string | null
   definition: string
-  examples: TypeExample[]
+  examples: string[]
+  version: number
 }
 
 const nodeTypes = ref<NodeType[]>([])
@@ -102,8 +99,12 @@ async function addNodeExample(nodeTypeId: number) {
   await fetchAll()
 }
 
-async function removeNodeExample(exampleId: number) {
-  await fetch(`/api/graph-types/node-type-example/${exampleId}`, { method: 'DELETE' })
+async function removeNodeExample(nodeTypeId: number, example: string) {
+  await fetch(`/api/graph-types/node-type/${nodeTypeId}/example`, {
+    method: 'DELETE',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ example }),
+  })
   await fetchAll()
 }
 
@@ -160,8 +161,12 @@ async function addEdgeExample(edgeTypeId: number) {
   await fetchAll()
 }
 
-async function removeEdgeExample(exampleId: number) {
-  await fetch(`/api/graph-types/edge-type-example/${exampleId}`, { method: 'DELETE' })
+async function removeEdgeExample(edgeTypeId: number, example: string) {
+  await fetch(`/api/graph-types/edge-type/${edgeTypeId}/example`, {
+    method: 'DELETE',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ example }),
+  })
   await fetchAll()
 }
 
@@ -329,6 +334,7 @@ onUnmounted(() => {
       <v-expansion-panel v-for="nt in nodeTypes" :key="nt.id">
         <v-expansion-panel-title>
           <span class="font-weight-medium">{{ nt.name }}</span>
+          <span class="text-caption text-medium-emphasis ml-2">v{{ nt.version }}</span>
           <template #actions="{ expanded }">
             <v-btn
               icon="mdi-pencil"
@@ -353,13 +359,13 @@ onUnmounted(() => {
           <div class="text-subtitle-2 mb-1">Examples</div>
           <v-chip
             v-for="ex in nt.examples"
-            :key="ex.id"
+            :key="ex"
             closable
             size="small"
             class="mr-1 mb-1"
-            @click:close="removeNodeExample(ex.id)"
+            @click:close="removeNodeExample(nt.id, ex)"
           >
-            {{ ex.example }}
+            {{ ex }}
           </v-chip>
           <div v-if="nt.examples.length === 0" class="text-body-2 text-medium-emphasis mb-2">
             No examples
@@ -404,6 +410,7 @@ onUnmounted(() => {
       <v-expansion-panel v-for="et in edgeTypes" :key="et.id">
         <v-expansion-panel-title>
           <span class="font-weight-medium">{{ et.name }}</span>
+          <span class="text-caption text-medium-emphasis ml-2">v{{ et.version }}</span>
           <span v-if="et.reverseName" class="text-medium-emphasis ml-2">
             (reverse: {{ et.reverseName }})
           </span>
@@ -431,13 +438,13 @@ onUnmounted(() => {
           <div class="text-subtitle-2 mb-1">Examples</div>
           <v-chip
             v-for="ex in et.examples"
-            :key="ex.id"
+            :key="ex"
             closable
             size="small"
             class="mr-1 mb-1"
-            @click:close="removeEdgeExample(ex.id)"
+            @click:close="removeEdgeExample(et.id, ex)"
           >
-            {{ ex.example }}
+            {{ ex }}
           </v-chip>
           <div v-if="et.examples.length === 0" class="text-body-2 text-medium-emphasis mb-2">
             No examples
