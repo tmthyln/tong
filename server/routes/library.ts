@@ -4,6 +4,17 @@ import { loadExtractedContent } from '../lib/extract-content'
 import { removeOverlaps } from '../lib/entity-extraction'
 import { getUserId, userType } from '../lib/auth'
 import { extractTermsFromText } from '../lib/text-terms'
+import {
+  promoteDocumentToScope,
+  promoteDocumentRelationshipsToScope,
+  SCOPE_PROMOTION_MODEL,
+} from '../lib/scope-promotion'
+import {
+  startEnrichmentRun,
+  completeEnrichmentRun,
+  failEnrichmentRun,
+  type OntologyRef,
+} from '../lib/enrichment-run'
 
 const libraryRoutes = new Hono<{ Bindings: Env }>()
 
@@ -1092,6 +1103,7 @@ libraryRoutes.patch('/document/:id', async (c) => {
 
   // Assign to a knowledge scope (entity universe) — independent of folder.
   // Once set, the assignment is permanent (changing or clearing is rejected).
+  let promoteAfterAssign: { documentId: number; scopeId: number } | null = null
   if (body.knowledgeScopeId !== undefined) {
     if (!canAssignDocumentScope(doc.knowledge_scope_id, body.knowledgeScopeId ?? null)) {
       return c.json(
@@ -1111,11 +1123,87 @@ libraryRoutes.patch('/document/:id', async (c) => {
       await c.env.DB.prepare('UPDATE document SET knowledge_scope_id = ? WHERE id = ?')
         .bind(body.knowledgeScopeId, id)
         .run()
+      // First-time assignment (null → scopeX) — kick off scope promotion async.
+      if (doc.knowledge_scope_id === null && body.knowledgeScopeId !== null) {
+        promoteAfterAssign = { documentId: id, scopeId: body.knowledgeScopeId }
+      }
     }
+  }
+
+  if (promoteAfterAssign) {
+    const { documentId, scopeId } = promoteAfterAssign
+    c.executionCtx.waitUntil(runScopePromotionAsync(c.env, documentId, scopeId))
   }
 
   return c.json({ success: true })
 })
+
+async function loadOntologyForRun(db: D1Database): Promise<OntologyRef[]> {
+  const [nodeRows, edgeRows] = await Promise.all([
+    db
+      .prepare('SELECT name, version FROM node_type WHERE is_current = 1')
+      .all<{ name: string; version: number }>(),
+    db
+      .prepare('SELECT name, version FROM edge_type WHERE is_current = 1')
+      .all<{ name: string; version: number }>(),
+  ])
+  return [
+    ...nodeRows.results.map((r) => ({ kind: 'node' as const, name: r.name, version: r.version })),
+    ...edgeRows.results.map((r) => ({ kind: 'edge' as const, name: r.name, version: r.version })),
+  ]
+}
+
+async function runScopePromotionAsync(
+  env: Env,
+  triggerDocumentId: number,
+  knowledgeScopeId: number
+): Promise<void> {
+  const ontology = await loadOntologyForRun(env.DB)
+  const runId = await startEnrichmentRun(env.DB, {
+    documentId: triggerDocumentId,
+    kind: 'scope_promotion',
+    model: SCOPE_PROMOTION_MODEL,
+    params: { knowledge_scope_id: knowledgeScopeId, trigger: 'late_assignment' },
+    ontology,
+  })
+  try {
+    const entResult = await promoteDocumentToScope(triggerDocumentId, knowledgeScopeId, env)
+    if (entResult.skipped) {
+      await completeEnrichmentRun(env.DB, runId, { skipped: entResult.skipped })
+      return
+    }
+    const relResult = await promoteDocumentRelationshipsToScope(
+      triggerDocumentId,
+      knowledgeScopeId,
+      env
+    )
+    for (const m of entResult.affectedDocumentIds) {
+      const retroRelResult = await promoteDocumentRelationshipsToScope(m, knowledgeScopeId, env)
+      const retroId = await startEnrichmentRun(env.DB, {
+        documentId: m,
+        kind: 'scope_promotion_retroactive',
+        model: SCOPE_PROMOTION_MODEL,
+        params: {
+          knowledge_scope_id: knowledgeScopeId,
+          triggered_by_document_id: triggerDocumentId,
+        },
+        ontology,
+      })
+      await completeEnrichmentRun(env.DB, retroId, {
+        scope_relationships_promoted: retroRelResult.relationshipsPromoted,
+      })
+    }
+    await completeEnrichmentRun(env.DB, runId, {
+      scope_entities_created: entResult.scopeEntitiesCreated,
+      scope_entities_linked: entResult.scopeEntitiesLinked,
+      scope_relationships_promoted: relResult.relationshipsPromoted,
+      affected_document_ids: entResult.affectedDocumentIds,
+    })
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    await failEnrichmentRun(env.DB, runId, msg)
+  }
+}
 
 libraryRoutes.post('/document', async (c) => {
   const formData = await c.req.formData()

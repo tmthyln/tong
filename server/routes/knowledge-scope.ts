@@ -1,5 +1,16 @@
 import { Hono } from 'hono'
 import { getUserId, userType } from '../lib/auth'
+import {
+  promoteDocumentToScope,
+  promoteDocumentRelationshipsToScope,
+  SCOPE_PROMOTION_MODEL,
+} from '../lib/scope-promotion'
+import {
+  startEnrichmentRun,
+  completeEnrichmentRun,
+  failEnrichmentRun,
+  type OntologyRef,
+} from '../lib/enrichment-run'
 
 const knowledgeScopeRoutes = new Hono<{ Bindings: Env }>()
 
@@ -149,5 +160,109 @@ knowledgeScopeRoutes.delete('/:id', async (c) => {
 
   return new Response(null, { status: 204 })
 })
+
+// POST /api/knowledge-scope/:id/run-promotion
+// Re-runs document → scope promotion across every document currently assigned
+// to this scope. Useful after ontology changes or to repair drifted state.
+knowledgeScopeRoutes.post('/:id/run-promotion', async (c) => {
+  if (userType(getUserId(c)) === 'public') {
+    return c.json({ error: 'Unauthorized' }, 401)
+  }
+
+  const id = parseInt(c.req.param('id'), 10)
+  if (isNaN(id)) return c.json({ error: 'Invalid scope ID' }, 400)
+
+  const scope = await c.env.DB.prepare('SELECT id FROM knowledge_scope WHERE id = ?')
+    .bind(id)
+    .first()
+  if (!scope) return c.json({ error: 'Scope not found' }, 404)
+
+  const docs = await c.env.DB.prepare(
+    'SELECT id FROM document WHERE knowledge_scope_id = ? ORDER BY id'
+  )
+    .bind(id)
+    .all<{ id: number }>()
+
+  const ontology = await loadOntologyForRun(c.env.DB)
+
+  let documentsProcessed = 0
+  let scopeEntitiesCreated = 0
+  let scopeEntitiesLinked = 0
+  let scopeRelationshipsPromoted = 0
+  const affectedAll = new Set<number>()
+
+  for (const d of docs.results) {
+    const runId = await startEnrichmentRun(c.env.DB, {
+      documentId: d.id,
+      kind: 'scope_promotion',
+      model: SCOPE_PROMOTION_MODEL,
+      params: { knowledge_scope_id: id, trigger: 'manual_rerun' },
+      ontology,
+    })
+    try {
+      const entResult = await promoteDocumentToScope(d.id, id, c.env)
+      documentsProcessed += 1
+      if (entResult.skipped) {
+        await completeEnrichmentRun(c.env.DB, runId, { skipped: entResult.skipped })
+        continue
+      }
+      scopeEntitiesCreated += entResult.scopeEntitiesCreated
+      scopeEntitiesLinked += entResult.scopeEntitiesLinked
+      const relResult = await promoteDocumentRelationshipsToScope(d.id, id, c.env)
+      scopeRelationshipsPromoted += relResult.relationshipsPromoted
+      for (const m of entResult.affectedDocumentIds) {
+        affectedAll.add(m)
+        const retroRelResult = await promoteDocumentRelationshipsToScope(m, id, c.env)
+        scopeRelationshipsPromoted += retroRelResult.relationshipsPromoted
+        const retroId = await startEnrichmentRun(c.env.DB, {
+          documentId: m,
+          kind: 'scope_promotion_retroactive',
+          model: SCOPE_PROMOTION_MODEL,
+          params: {
+            knowledge_scope_id: id,
+            triggered_by_document_id: d.id,
+            trigger: 'manual_rerun',
+          },
+          ontology,
+        })
+        await completeEnrichmentRun(c.env.DB, retroId, {
+          scope_relationships_promoted: retroRelResult.relationshipsPromoted,
+        })
+      }
+      await completeEnrichmentRun(c.env.DB, runId, {
+        scope_entities_created: entResult.scopeEntitiesCreated,
+        scope_entities_linked: entResult.scopeEntitiesLinked,
+        scope_relationships_promoted: relResult.relationshipsPromoted,
+        affected_document_ids: entResult.affectedDocumentIds,
+      })
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      await failEnrichmentRun(c.env.DB, runId, msg)
+    }
+  }
+
+  return c.json({
+    documentsProcessed,
+    scopeEntitiesCreated,
+    scopeEntitiesLinked,
+    scopeRelationshipsPromoted,
+    affectedDocumentIds: [...affectedAll],
+  })
+})
+
+async function loadOntologyForRun(db: D1Database): Promise<OntologyRef[]> {
+  const [nodeRows, edgeRows] = await Promise.all([
+    db
+      .prepare('SELECT name, version FROM node_type WHERE is_current = 1')
+      .all<{ name: string; version: number }>(),
+    db
+      .prepare('SELECT name, version FROM edge_type WHERE is_current = 1')
+      .all<{ name: string; version: number }>(),
+  ])
+  return [
+    ...nodeRows.results.map((r) => ({ kind: 'node' as const, name: r.name, version: r.version })),
+    ...edgeRows.results.map((r) => ({ kind: 'edge' as const, name: r.name, version: r.version })),
+  ]
+}
 
 export default knowledgeScopeRoutes

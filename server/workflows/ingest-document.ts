@@ -27,8 +27,75 @@ import {
   failEnrichmentRun,
   type OntologyRef,
 } from '../lib/enrichment-run'
+import {
+  promoteDocumentToScope,
+  promoteDocumentRelationshipsToScope,
+  SCOPE_PROMOTION_MODEL,
+} from '../lib/scope-promotion'
 
 const LLM_STEP_RETRIES = { retries: { limit: 4, delay: '5 second', backoff: 'exponential' } } as const
+
+/**
+ * Run scope promotion for one document under a known knowledge scope. Writes
+ * one scope_promotion enrichment run for the trigger document, and one
+ * scope_promotion_retroactive run for each other document whose entities were
+ * touched in the process.
+ */
+async function runScopePromotion(
+  env: Env,
+  triggerDocumentId: number,
+  knowledgeScopeId: number,
+  ctx: EntityTypeContext,
+  step: WorkflowStep
+): Promise<void> {
+  const ontology = [...ctx.nodeOntology, ...ctx.edgeOntology]
+
+  await step.do('scope-promote-trigger', LLM_STEP_RETRIES, async () => {
+    const runId = await startEnrichmentRun(env.DB, {
+      documentId: triggerDocumentId,
+      kind: 'scope_promotion',
+      model: SCOPE_PROMOTION_MODEL,
+      params: { knowledge_scope_id: knowledgeScopeId },
+      ontology,
+    })
+    try {
+      const entResult = await promoteDocumentToScope(triggerDocumentId, knowledgeScopeId, env)
+      if (entResult.skipped) {
+        await completeEnrichmentRun(env.DB, runId, { skipped: entResult.skipped })
+        return
+      }
+      const relResult = await promoteDocumentRelationshipsToScope(
+        triggerDocumentId,
+        knowledgeScopeId,
+        env
+      )
+      // Retroactive runs for affected docs.
+      for (const m of entResult.affectedDocumentIds) {
+        const retroRelResult = await promoteDocumentRelationshipsToScope(m, knowledgeScopeId, env)
+        const retroId = await startEnrichmentRun(env.DB, {
+          documentId: m,
+          kind: 'scope_promotion_retroactive',
+          model: SCOPE_PROMOTION_MODEL,
+          params: { knowledge_scope_id: knowledgeScopeId, triggered_by_document_id: triggerDocumentId },
+          ontology,
+        })
+        await completeEnrichmentRun(env.DB, retroId, {
+          scope_relationships_promoted: retroRelResult.relationshipsPromoted,
+        })
+      }
+      await completeEnrichmentRun(env.DB, runId, {
+        scope_entities_created: entResult.scopeEntitiesCreated,
+        scope_entities_linked: entResult.scopeEntitiesLinked,
+        scope_relationships_promoted: relResult.relationshipsPromoted,
+        affected_document_ids: entResult.affectedDocumentIds,
+      })
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      await failEnrichmentRun(env.DB, runId, msg)
+      throw err
+    }
+  })
+}
 
 interface IngestDocumentParams {
   location: string
@@ -651,7 +718,12 @@ export class IngestDocumentWorkflow extends WorkflowEntrypoint<Env, IngestDocume
       })
     }
 
-    // Phase 11: MT baseline translation (draft_number = -1) — n steps
+    // Phase 11: Knowledge-scope promotion — runs only when the document is assigned a scope.
+    if (payload.knowledgeScopeId !== null) {
+      await runScopePromotion(this.env, documentId, payload.knowledgeScopeId, entityTypeContext, step)
+    }
+
+    // Phase 12: MT baseline translation (draft_number = -1) — n steps
     await Promise.allSettled(
       chunkIds.map((chunkId) =>
         step.do(`translate-chunk-mt-baseline-${chunkId}`, LLM_STEP_RETRIES, async () => {
@@ -663,7 +735,7 @@ export class IngestDocumentWorkflow extends WorkflowEntrypoint<Env, IngestDocume
         })
       )
     )
-    console.log(`[ingest] Document ${documentId}: Phase 11 complete — ${chunkIds.length} chunks MT baseline translated`)
+    console.log(`[ingest] Document ${documentId}: Phase 12 complete — ${chunkIds.length} chunks MT baseline translated`)
 
     // Phase 12: LLM+MT context baseline translation (draft_number = 0) — n steps
     await Promise.allSettled(
@@ -677,7 +749,7 @@ export class IngestDocumentWorkflow extends WorkflowEntrypoint<Env, IngestDocume
         })
       )
     )
-    console.log(`[ingest] Document ${documentId}: Phase 12 complete — ${chunkIds.length} chunks LLM+MT baseline translated`)
+    console.log(`[ingest] Document ${documentId}: Phase 13 complete — ${chunkIds.length} chunks LLM+MT baseline translated`)
 
     // Phase 13: Initial translation draft — n steps
     await Promise.allSettled(
@@ -691,7 +763,7 @@ export class IngestDocumentWorkflow extends WorkflowEntrypoint<Env, IngestDocume
         })
       )
     )
-    console.log(`[ingest] Document ${documentId}: Phase 13 complete — ${chunkIds.length} chunks translated (initial draft)`)
+    console.log(`[ingest] Document ${documentId}: Phase 14 complete — ${chunkIds.length} chunks translated (initial draft)`)
 
     // Phase 14: Revised translation draft — n steps
     await Promise.allSettled(
@@ -705,7 +777,7 @@ export class IngestDocumentWorkflow extends WorkflowEntrypoint<Env, IngestDocume
         })
       )
     )
-    console.log(`[ingest] Document ${documentId}: Phase 14 complete — ${chunkIds.length} chunks translated (revision)`)
+    console.log(`[ingest] Document ${documentId}: Phase 15 complete — ${chunkIds.length} chunks translated (revision)`)
 
     return { documentId, chunkCount: chunkIds.length }
   }
