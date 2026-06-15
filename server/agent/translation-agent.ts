@@ -34,6 +34,14 @@ import {
   type NodeStatus,
 } from '../lib/agent/context-tree'
 import { createBranchTools, buildBranchSystemPrompt } from '../lib/agent/branch'
+import {
+  PROACTIVE_DEBOUNCE_SECONDS,
+  shouldConsider,
+  summarizeRecentActions,
+  buildProactivePrompt,
+} from '../lib/agent/proactivity'
+import { tool } from 'ai'
+import { z } from 'zod'
 
 /**
  * Model that drives the agent's reasoning/tool loop. Llama 3.3 70b supports
@@ -135,6 +143,7 @@ export class TranslationAgent extends AIChatAgent<Env, TranslationAgentState> {
   @callable()
   async recordActions(events: ActionEvent[]): Promise<void> {
     this.appendActions(events)
+    await this.scheduleConsider()
   }
 
   /** Persist actions to the action_log and fold focus into state. */
@@ -367,6 +376,79 @@ export class TranslationAgent extends AIChatAgent<Env, TranslationAgentState> {
       this.queueSuggestion(suggestion)
       existing.add(key)
     }
+  }
+
+  // ── Proactive engine (temporal non-linearity) ───────────────────────────────
+
+  /** Debounce: (re)schedule a single proactive consideration once activity settles. */
+  private async scheduleConsider(): Promise<void> {
+    for (const s of this.getSchedules()) {
+      if (s.callback === 'considerProactively') await this.cancelSchedule(s.id)
+    }
+    await this.schedule(PROACTIVE_DEBOUNCE_SECONDS, 'considerProactively', {})
+  }
+
+  /**
+   * Scheduled handler: review actions since the last consideration and maybe
+   * help — surface suggestions and/or spawn investigation branches. The model is
+   * free to do nothing.
+   */
+  async considerProactively(): Promise<void> {
+    const cursor = Number(this.getMeta('lastConsideredActionId') ?? '0')
+    const rows = this.sql<{ id: number; payload: string }>`
+      SELECT id, payload FROM action_log WHERE id > ${cursor} ORDER BY id LIMIT 50`
+    if (rows.length === 0) return
+
+    const actions = rows.map((r) => JSON.parse(r.payload) as ActionEvent)
+    this.setMeta('lastConsideredActionId', String(rows[rows.length - 1].id))
+
+    if (!shouldConsider(actions)) return
+
+    this.setState({ ...this.state, status: 'thinking' })
+    try {
+      const workersai = createWorkersAI({ binding: this.env.AI })
+      const tools = {
+        ...createSelfTools({ env: this.env, userId: this.name, documentId: this.state.focus.documentId ?? undefined }),
+        ...createUserFacingTools({ addSuggestion: (payload) => this.queueSuggestion(payload) }),
+        investigate: tool({
+          description:
+            'Spin off a deeper investigation branch for a complex, multi-part task. Returns once the branch is launched.',
+          inputSchema: z.object({ goal: z.string().describe('What the branch should investigate') }),
+          execute: async ({ goal }) => {
+            const { branchId } = await this.investigate(goal)
+            return `Launched investigation branch ${branchId}.`
+          },
+        }),
+      }
+
+      await generateText({
+        model: workersai(AGENT_MODEL),
+        system: buildProactivePrompt(this.state.focus, summarizeRecentActions(actions)),
+        prompt: 'Consider whether to help right now.',
+        tools,
+        stopWhen: stepCountIs(MAX_TOOL_STEPS),
+      })
+    } catch (err) {
+      console.error('[agent] proactive turn failed', err)
+    } finally {
+      this.setState({ ...this.state, status: 'idle' })
+    }
+  }
+
+  private ensureMetaSchema(): void {
+    this.sql`CREATE TABLE IF NOT EXISTS agent_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)`
+  }
+
+  private getMeta(key: string): string | null {
+    this.ensureMetaSchema()
+    const rows = this.sql<{ value: string }>`SELECT value FROM agent_meta WHERE key = ${key}`
+    return rows.length > 0 ? rows[0].value : null
+  }
+
+  private setMeta(key: string, value: string): void {
+    this.ensureMetaSchema()
+    this.sql`INSERT INTO agent_meta (key, value) VALUES (${key}, ${value})
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value`
   }
 }
 
