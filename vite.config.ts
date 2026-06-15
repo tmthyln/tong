@@ -5,6 +5,7 @@ import vue from '@vitejs/plugin-vue'
 import vueDevTools from 'vite-plugin-vue-devtools'
 
 import { cloudflare } from "@cloudflare/vite-plugin"
+import agents from 'agents/vite'
 import pkg from './package.json'
 
 // https://vite.dev/config/
@@ -16,7 +17,10 @@ export default defineConfig({
 	plugins: [
 		vue(),
 		vueDevTools(),
-		cloudflare()
+		cloudflare(),
+		// Transforms the Agents SDK's TC39 @callable decorators (Oxc/dev can't
+		// parse them) — without this `npm run dev` fails to start.
+		agents(),
 	],
 	resolve: {
 		alias: {
