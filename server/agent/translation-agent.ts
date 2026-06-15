@@ -11,6 +11,8 @@ import {
   type ExplainResult,
   type DisambiguateResult,
 } from '../lib/agent/explain'
+import { INITIAL_FOCUS, reduceFocusBatch, type ActionEvent } from '../lib/agent/actions'
+import type { TranslationAgentState } from '../lib/agent/state'
 
 /**
  * Model that drives the agent's reasoning/tool loop. Llama 3.3 70b supports
@@ -46,11 +48,17 @@ type OnChatOptions = Parameters<AIChatAgent<Env>['onChatMessage']>[1]
  * Instance name = userId (see `server/index.ts` routing). The class is a thin
  * orchestration shell; logic lives in testable functions under `server/lib/agent/`.
  */
-export class TranslationAgent extends AIChatAgent<Env> {
+export class TranslationAgent extends AIChatAgent<Env, TranslationAgentState> {
+  initialState: TranslationAgentState = { focus: INITIAL_FOCUS, status: 'idle' }
+
   async onChatMessage(onFinish: OnFinish, options?: OnChatOptions): Promise<Response | undefined> {
     const workersai = createWorkersAI({ binding: this.env.AI })
     // `this.name` is the instance name, which we key by userId.
-    const tools = createSelfTools({ env: this.env, userId: this.name })
+    const tools = createSelfTools({
+      env: this.env,
+      userId: this.name,
+      documentId: this.state.focus.documentId ?? undefined,
+    })
 
     const result = streamText({
       model: workersai(AGENT_MODEL),
@@ -79,5 +87,31 @@ export class TranslationAgent extends AIChatAgent<Env> {
   @callable()
   async disambiguate(params: DisambiguateParams): Promise<DisambiguateResult> {
     return disambiguateTerm(this.env, params)
+  }
+
+  /**
+   * Ingest a batch of user actions (the action stream). Appends them to the
+   * action_log and updates the focus. The client batches these (mirroring the
+   * existing /api/library/chunks/seen batching). Proactive turns off this log
+   * arrive in Phase 6.
+   */
+  @callable()
+  async recordActions(events: ActionEvent[]): Promise<void> {
+    if (events.length === 0) return
+
+    this.sql`CREATE TABLE IF NOT EXISTS action_log (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      type TEXT NOT NULL,
+      payload TEXT NOT NULL,
+      at TEXT NOT NULL
+    )`
+
+    for (const event of events) {
+      this.sql`INSERT INTO action_log (type, payload, at)
+               VALUES (${event.type}, ${JSON.stringify(event)}, ${event.at})`
+    }
+
+    const focus = reduceFocusBatch(this.state.focus, events)
+    this.setState({ ...this.state, focus })
   }
 }
