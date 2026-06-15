@@ -135,6 +135,46 @@ export class TranslationAgent extends AIChatAgent<Env, TranslationAgentState> {
   }
 
   /**
+   * Direct chat turn (the panel's text box). Runs one tool-using turn that can
+   * answer, surface suggestions, or spin off an investigation. Stateless across
+   * calls for now — the document/toolbar/suggestion UI is the primary channel,
+   * with chat as a secondary, "thoughtfully hidden" input.
+   */
+  @callable()
+  async chat(message: string): Promise<{ reply: string }> {
+    const workersai = createWorkersAI({ binding: this.env.AI })
+    const result = await generateText({
+      model: workersai(AGENT_MODEL),
+      system: SYSTEM_PROMPT,
+      prompt: message,
+      tools: this.buildRootTools(),
+      stopWhen: stepCountIs(MAX_TOOL_STEPS),
+    })
+    return { reply: result.text }
+  }
+
+  /** Self-tools + user-facing tools + investigate — the toolset for root-level turns. */
+  private buildRootTools() {
+    return {
+      ...createSelfTools({
+        env: this.env,
+        userId: this.name,
+        documentId: this.state.focus.documentId ?? undefined,
+      }),
+      ...createUserFacingTools({ addSuggestion: (payload) => this.queueSuggestion(payload) }),
+      investigate: tool({
+        description:
+          'Spin off a deeper investigation branch for a complex, multi-part task. Returns once the branch is launched.',
+        inputSchema: z.object({ goal: z.string().describe('What the branch should investigate') }),
+        execute: async ({ goal }) => {
+          const { branchId } = await this.investigate(goal)
+          return `Launched investigation branch ${branchId}.`
+        },
+      }),
+    }
+  }
+
+  /**
    * Ingest a batch of user actions (the action stream). Appends them to the
    * action_log and updates the focus. The client batches these (mirroring the
    * existing /api/library/chunks/seen batching). Proactive turns off this log
@@ -407,25 +447,11 @@ export class TranslationAgent extends AIChatAgent<Env, TranslationAgentState> {
     this.setState({ ...this.state, status: 'thinking' })
     try {
       const workersai = createWorkersAI({ binding: this.env.AI })
-      const tools = {
-        ...createSelfTools({ env: this.env, userId: this.name, documentId: this.state.focus.documentId ?? undefined }),
-        ...createUserFacingTools({ addSuggestion: (payload) => this.queueSuggestion(payload) }),
-        investigate: tool({
-          description:
-            'Spin off a deeper investigation branch for a complex, multi-part task. Returns once the branch is launched.',
-          inputSchema: z.object({ goal: z.string().describe('What the branch should investigate') }),
-          execute: async ({ goal }) => {
-            const { branchId } = await this.investigate(goal)
-            return `Launched investigation branch ${branchId}.`
-          },
-        }),
-      }
-
       await generateText({
         model: workersai(AGENT_MODEL),
         system: buildProactivePrompt(this.state.focus, summarizeRecentActions(actions)),
         prompt: 'Consider whether to help right now.',
-        tools,
+        tools: this.buildRootTools(),
         stopWhen: stepCountIs(MAX_TOOL_STEPS),
       })
     } catch (err) {

@@ -1,14 +1,17 @@
 <script setup lang="ts">
 import { RouterView } from 'vue-router'
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
 import { useUser } from './composables/useUser'
 import { usePreferences } from './composables/usePreferences'
+import { useTranslationAgent } from './composables/useTranslationAgent'
 import PreferencesDialog from './components/PreferencesDialog.vue'
+import AgentPanel from './components/agent/AgentPanel.vue'
 
 const drawer = ref(true)
 const prefsOpen = ref(false)
 
 const {
+  userId,
   userType,
   displayName,
   expiresIn,
@@ -18,6 +21,17 @@ const {
   createTestAccount: createTestAccountUser,
 } = useUser()
 const { fetchPreferences } = usePreferences()
+const { connect: connectAgent, disconnect: disconnectAgent } = useTranslationAgent()
+
+// Connect the agent for authenticated/test users (not public, read-only).
+watch(
+  userId,
+  (id) => {
+    if (id && id !== 'public') connectAgent(id)
+    else disconnectAgent()
+  },
+  { immediate: true },
+)
 
 const selectedAccount = ref<string>('alice')
 const accountMenuOpen = ref(false)
@@ -143,6 +157,8 @@ const navItems = [
     <v-main class="main-content">
       <RouterView />
     </v-main>
+
+    <AgentPanel />
   </v-app>
 </template>
 
