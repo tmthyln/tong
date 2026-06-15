@@ -1,6 +1,7 @@
 import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue'
 import type { Ref, ComputedRef } from 'vue'
 import type { Document, Entity } from '../types/document'
+import { useTranslationAgent } from './useTranslationAgent'
 
 interface DictEntry {
   id: number
@@ -48,6 +49,8 @@ export function useSelectionToolbar(
   const activeEntityId   = ref<number | null>(null)
   const activeEntityText = ref<string | null>(null)
   const activeParentId   = ref<number | null>(null)
+
+  const agent = useTranslationAgent()
 
   const toolbarStyle = computed(() => {
     if (toolbarDragged.value) {
@@ -262,6 +265,13 @@ export function useSelectionToolbar(
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
       const data = await res.json() as { results: DictEntry[] }
       toolbar.value.results = data.results
+      agent.recordAction({
+        type: 'lookup',
+        term: toolbar.value.text,
+        documentId: document.value?.id ?? null,
+        chunkId: toolbar.value.chunkId,
+        at: new Date().toISOString(),
+      })
     } catch (e) {
       toolbar.value.error = e instanceof Error ? e.message : 'Lookup failed'
     } finally {
@@ -274,17 +284,25 @@ export function useSelectionToolbar(
   async function explainInContext() {
     const { text, results, chunkId } = toolbar.value
     if (!document.value || chunkId == null) return
+    const documentId = document.value.id
     toolbar.value.explainLoading = true
     toolbar.value.error = null
+    agent.recordAction({ type: 'explain_requested', term: text, documentId, chunkId, at: new Date().toISOString() })
     try {
-      const res = await fetch('/api/dictionary/explain', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ term: text, entries: results, documentId: document.value.id, chunkId }),
-      })
-      if (!res.ok) throw new Error(`HTTP ${res.status}`)
-      const data = await res.json() as { explanation: string }
-      toolbar.value.explanation = data.explanation
+      // Prefer the agent (it also gains context); fall back to the standalone route.
+      const viaAgent = await agent.explain({ term: text, entries: results, documentId, chunkId })
+      if (viaAgent) {
+        toolbar.value.explanation = viaAgent.explanation
+      } else {
+        const res = await fetch('/api/dictionary/explain', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ term: text, entries: results, documentId, chunkId }),
+        })
+        if (!res.ok) throw new Error(`HTTP ${res.status}`)
+        const data = await res.json() as { explanation: string }
+        toolbar.value.explanation = data.explanation
+      }
     } catch (e) {
       toolbar.value.error = e instanceof Error ? e.message : 'Explain failed'
     } finally {
@@ -295,18 +313,26 @@ export function useSelectionToolbar(
   async function disambiguate() {
     const { text, results, chunkId } = toolbar.value
     if (!document.value || chunkId == null) return
+    const documentId = document.value.id
     toolbar.value.disambiguateLoading = true
     toolbar.value.error = null
+    agent.recordAction({ type: 'disambiguate_requested', term: text, documentId, chunkId, at: new Date().toISOString() })
     try {
-      const res = await fetch('/api/dictionary/disambiguate', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ term: text, entries: results, documentId: document.value.id, chunkId }),
-      })
-      if (!res.ok) throw new Error(`HTTP ${res.status}`)
-      const data = await res.json() as { explanation: string; entryId: number }
-      toolbar.value.disambiguatedEntryId = data.entryId
-      toolbar.value.explanation = data.explanation
+      const viaAgent = await agent.disambiguate({ term: text, entries: results, documentId, chunkId })
+      if (viaAgent) {
+        toolbar.value.disambiguatedEntryId = viaAgent.entryId ?? null
+        toolbar.value.explanation = viaAgent.explanation
+      } else {
+        const res = await fetch('/api/dictionary/disambiguate', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ term: text, entries: results, documentId, chunkId }),
+        })
+        if (!res.ok) throw new Error(`HTTP ${res.status}`)
+        const data = await res.json() as { explanation: string; entryId: number }
+        toolbar.value.disambiguatedEntryId = data.entryId
+        toolbar.value.explanation = data.explanation
+      }
     } catch (e) {
       toolbar.value.error = e instanceof Error ? e.message : 'Disambiguate failed'
     } finally {
@@ -404,8 +430,10 @@ export function useSelectionToolbar(
     toolbar.value.loading = true
     toolbar.value.error = null
     try {
-      const res = await fetch(`/api/lexicon/${encodeURIComponent(toolbar.value.text)}/fail`, { method: 'POST' })
+      const failedTerm = toolbar.value.text
+      const res = await fetch(`/api/lexicon/${encodeURIComponent(failedTerm)}/fail`, { method: 'POST' })
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      agent.recordAction({ type: 'term_failed', term: failedTerm, at: new Date().toISOString() })
       toolbar.value.show = false
     } catch (e) {
       toolbar.value.error = e instanceof Error ? e.message : 'Mark failed'
@@ -416,13 +444,17 @@ export function useSelectionToolbar(
 
   async function deleteEntity() {
     if (activeEntityId.value == null) return
+    const deletedEntityId = activeEntityId.value
     toolbar.value.loading = true
     toolbar.value.error = null
     try {
-      const res = await fetch(`/api/knowledge/entity/${activeEntityId.value}`, {
+      const res = await fetch(`/api/knowledge/entity/${deletedEntityId}`, {
         method: 'DELETE',
       })
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      if (document.value) {
+        agent.recordAction({ type: 'entity_deleted', documentId: document.value.id, entityId: deletedEntityId, at: new Date().toISOString() })
+      }
       toolbar.value.show = false
       await onEntityCreated()
     } catch (e) {
@@ -434,20 +466,22 @@ export function useSelectionToolbar(
 
   async function createEntity() {
     if (!toolbar.value.chunkId || !document.value || !toolbar.value.createEntityType || !toolbar.value.text) return
+    const created = {
+      text: toolbar.value.text,
+      entityType: toolbar.value.createEntityType,
+      chunkId: toolbar.value.chunkId,
+      documentId: document.value.id,
+    }
     toolbar.value.createEntityLoading = true
     toolbar.value.error = null
     try {
       const res = await fetch('/api/knowledge/entity', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          text: toolbar.value.text,
-          entityType: toolbar.value.createEntityType,
-          chunkId: toolbar.value.chunkId,
-          documentId: document.value.id,
-        }),
+        body: JSON.stringify(created),
       })
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      agent.recordAction({ type: 'entity_created', ...created, at: new Date().toISOString() })
       toolbar.value.show = false
       await onEntityCreated()
     } catch (e) {

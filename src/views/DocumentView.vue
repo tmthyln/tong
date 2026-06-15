@@ -8,12 +8,15 @@ import DictPronunciation from '../components/DictPronunciation.vue'
 import { useUser } from '../composables/useUser'
 import { useTranslation } from '../composables/useTranslation'
 import { useSelectionToolbar } from '../composables/useSelectionToolbar'
+import { useTranslationAgent } from '../composables/useTranslationAgent'
+import InlineSuggestions from '../components/agent/InlineSuggestions.vue'
 import type { Entity, Chunk, Document, SimilarDoc } from '../types/document'
 
 type DocumentMode = 'reading' | 'translation' | 'reader'
 
 const route = useRoute()
 const { userId } = useUser()
+const { recordAction: recordAgentAction } = useTranslationAgent()
 const documentMode = useLocalStorage<DocumentMode>('pref:documentMode', 'reading')
 const document = ref<Document | null>(null)
 const loading = ref(false)
@@ -47,6 +50,9 @@ function flushSeen(useBeacon = false) {
 
 function scheduleSeen(chunkId: number) {
   pendingSeen.add(chunkId)
+  if (document.value) {
+    recordAgentAction({ type: 'chunk_seen', documentId: document.value.id, chunkId, at: new Date().toISOString() })
+  }
   if (seenFlushTimer) clearTimeout(seenFlushTimer)
   seenFlushTimer = setTimeout(() => flushSeen(false), 1500)
 }
@@ -330,6 +336,9 @@ async function fetchDocument() {
       throw new Error(data.error || 'Failed to fetch document')
     }
     document.value = await response.json()
+    if (document.value) {
+      recordAgentAction({ type: 'document_opened', documentId: document.value.id, at: new Date().toISOString() })
+    }
     if (translationMode.value) {
       await nextTick()
       computeOverview()
@@ -595,6 +604,7 @@ onUnmounted(() => {
                 </div>
               </template>
             </div>
+            <InlineSuggestions :chunk-id="chunk.id" class="inline-suggestions-row" />
           </template>
         </div>
       </div>
@@ -924,6 +934,11 @@ onUnmounted(() => {
 
 .translation-layout--reading .translation-grid {
   grid-template-columns: 1fr;
+}
+
+/* Inline agent suggestions span the full grid width, appearing under their chunk. */
+.inline-suggestions-row {
+  grid-column: 1 / -1;
 }
 
 .translation-chunk-text {

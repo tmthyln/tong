@@ -2,6 +2,7 @@ import { ref, computed, watch, onUnmounted, nextTick } from 'vue'
 import type { Ref } from 'vue'
 import { diffWords } from 'diff'
 import type { Chunk, Document } from '../types/document'
+import { useTranslationAgent } from './useTranslationAgent'
 
 type DocumentMode = 'reading' | 'translation' | 'reader'
 
@@ -24,6 +25,8 @@ export function useTranslation(
   const compareState = ref<Record<number, CompareEntry | null>>({})
   const draftMenuOpen = ref<Record<number, boolean>>({})
   const diffEditorRefs: Record<number, HTMLElement | null> = {}
+
+  const { recordAction } = useTranslationAgent()
 
   function initTranslations() {
     if (!document.value) return
@@ -60,6 +63,11 @@ export function useTranslation(
         }
       }
       computeOverview()
+
+      const documentId = document.value?.id
+      if (documentId != null) {
+        recordAction({ type: 'translation_saved', documentId, chunkId, draftNumber: data.draftNumber, at: new Date().toISOString() })
+      }
 
       saveStatus.value[chunkId] = 'saved'
       setTimeout(() => {

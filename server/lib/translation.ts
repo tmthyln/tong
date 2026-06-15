@@ -204,6 +204,25 @@ async function storeTranslation(
     .run()
 }
 
+/**
+ * Write an agent-authored translation as a new draft (translator `ai:agent`).
+ * Used when the user accepts a translation suggestion. Follows the draft-number
+ * rule: AI-authored content always increments to a new draft.
+ */
+export async function writeAgentTranslationDraft(
+  env: Env,
+  chunkId: number,
+  content: string
+): Promise<{ draftNumber: number }> {
+  const row = await env.DB
+    .prepare('SELECT COALESCE(MAX(draft_number), 0) AS max_draft FROM translation_chunk WHERE text_chunk_id = ?')
+    .bind(chunkId)
+    .first<{ max_draft: number }>()
+  const draftNumber = (row?.max_draft ?? 0) + 1
+  await storeTranslation(chunkId, content, draftNumber, env, 'ai:agent')
+  return { draftNumber }
+}
+
 function buildLLMWithMTMessages(
   content: string,
   preceding: Array<{ content: string }>,
