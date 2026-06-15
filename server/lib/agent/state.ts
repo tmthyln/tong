@@ -7,8 +7,16 @@
 
 import type { AgentFocus } from './actions'
 import type { Suggestion } from './suggestions'
+import type { NodeStatus } from './context-tree'
 
 export type AgentStatus = 'idle' | 'thinking'
+
+/** A branch the UI can show as "investigating…". */
+export interface BranchSummary {
+  id: string
+  goal: string
+  status: NodeStatus
+}
 
 export interface TranslationAgentState {
   /** Which document/chunk the user is currently focused on. */
@@ -17,4 +25,6 @@ export interface TranslationAgentState {
   status: AgentStatus
   /** Pending + resolved suggestions; the UI renders from this list. */
   suggestions: Suggestion[]
+  /** Active/completed investigation branches, for a subtle activity indicator. */
+  branches: BranchSummary[]
 }

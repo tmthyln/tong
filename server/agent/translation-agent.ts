@@ -1,5 +1,5 @@
 import { AIChatAgent } from '@cloudflare/ai-chat'
-import { convertToModelMessages, streamText, stepCountIs } from 'ai'
+import { convertToModelMessages, streamText, generateText, stepCountIs } from 'ai'
 import { createWorkersAI } from 'workers-ai-provider'
 import { callable } from 'agents'
 import { createSelfTools, createUserFacingTools } from '../lib/agent/tools'
@@ -12,7 +12,7 @@ import {
   type DisambiguateResult,
 } from '../lib/agent/explain'
 import { INITIAL_FOCUS, reduceFocusBatch, type ActionEvent } from '../lib/agent/actions'
-import type { TranslationAgentState } from '../lib/agent/state'
+import type { TranslationAgentState, BranchSummary } from '../lib/agent/state'
 import {
   makeSuggestion,
   addSuggestion,
@@ -24,6 +24,16 @@ import {
 } from '../lib/agent/suggestions'
 import { createEntityFromText, deleteEntityCascade, enrichAfterEntityChange } from '../lib/agent/entities'
 import { writeAgentTranslationDraft } from '../lib/translation'
+import {
+  ROOT_NODE_ID,
+  assembleBranchView,
+  synthesizeSuggestions,
+  type ContextNode,
+  type Finding,
+  type FindingPayload,
+  type NodeStatus,
+} from '../lib/agent/context-tree'
+import { createBranchTools, buildBranchSystemPrompt } from '../lib/agent/branch'
 
 /**
  * Model that drives the agent's reasoning/tool loop. Llama 3.3 70b supports
@@ -44,6 +54,7 @@ You help with translation and knowledge-management tasks. You have tools to look
 Use tools before answering when a lookup would make your answer more accurate. Keep replies concise and direct; never use filler phrases. Prefer the user's own context (the document they are reading) over general knowledge.`
 
 const MAX_TOOL_STEPS = 6
+const BRANCH_MAX_STEPS = 8
 
 type OnFinish = Parameters<AIChatAgent<Env>['onChatMessage']>[0]
 type OnChatOptions = Parameters<AIChatAgent<Env>['onChatMessage']>[1]
@@ -60,7 +71,7 @@ type OnChatOptions = Parameters<AIChatAgent<Env>['onChatMessage']>[1]
  * orchestration shell; logic lives in testable functions under `server/lib/agent/`.
  */
 export class TranslationAgent extends AIChatAgent<Env, TranslationAgentState> {
-  initialState: TranslationAgentState = { focus: INITIAL_FOCUS, status: 'idle', suggestions: [] }
+  initialState: TranslationAgentState = { focus: INITIAL_FOCUS, status: 'idle', suggestions: [], branches: [] }
 
   async onChatMessage(onFinish: OnFinish, options?: OnChatOptions): Promise<Response | undefined> {
     const workersai = createWorkersAI({ binding: this.env.AI })
@@ -220,6 +231,141 @@ export class TranslationAgent extends AIChatAgent<Env, TranslationAgentState> {
       }
       case 'question':
         return { ok: false, error: 'Questions are resolved with action "answer", not "accept".' }
+    }
+  }
+
+  // ── Context tree + durable-fiber branches (investigative non-linearity) ──────
+
+  /**
+   * Launch an investigation branch toward `goal`, as a child of `parentId`
+   * (root by default). The branch runs as a durable fiber: it assembles a view
+   * of shared + ancestor findings, investigates with the branch tools, and
+   * records findings. On completion, shared candidate suggestions are promoted.
+   */
+  @callable()
+  async investigate(goal: string, parentId: string = ROOT_NODE_ID): Promise<{ branchId: string }> {
+    this.ensureTreeSchema()
+    this.ensureRootNode()
+    const branchId = crypto.randomUUID()
+    const now = new Date().toISOString()
+    this.sql`INSERT INTO context_node (id, parent_id, kind, goal, status, created_at, updated_at)
+             VALUES (${branchId}, ${parentId}, 'branch', ${goal}, 'open', ${now}, ${now})`
+    this.refreshBranchesState()
+    this.ctx.waitUntil(this.runBranch(branchId))
+    return { branchId }
+  }
+
+  private async runBranch(branchId: string): Promise<void> {
+    this.setBranchStatus(branchId, 'investigating')
+    const { nodes, findings } = this.loadTree()
+    const view = assembleBranchView(nodes, findings, branchId)
+    const tools = createBranchTools({
+      env: this.env,
+      userId: this.name,
+      documentId: this.state.focus.documentId ?? undefined,
+      recordFinding: (payload, shared) => this.insertFinding(branchId, payload, shared),
+    })
+    const workersai = createWorkersAI({ binding: this.env.AI })
+
+    try {
+      // Durable fiber: the LLM investigation is checkpointed against eviction.
+      await this.runFiber(branchId, async () => {
+        await generateText({
+          model: workersai(AGENT_MODEL),
+          system: buildBranchSystemPrompt(view),
+          prompt: 'Begin your investigation now.',
+          tools,
+          stopWhen: stepCountIs(BRANCH_MAX_STEPS),
+        })
+      })
+      this.setBranchStatus(branchId, 'done')
+    } catch (err) {
+      console.error('[agent] branch failed', branchId, err)
+      this.setBranchStatus(branchId, 'failed')
+    }
+
+    this.promoteFindings()
+  }
+
+  /** On DO restart, fail any branch that was mid-investigation (no auto-resume). */
+  async onFiberRecovered(ctx: { name: string }): Promise<void> {
+    this.setBranchStatus(ctx.name, 'failed')
+  }
+
+  private ensureTreeSchema(): void {
+    this.sql`CREATE TABLE IF NOT EXISTS context_node (
+      id TEXT PRIMARY KEY, parent_id TEXT, kind TEXT NOT NULL, goal TEXT NOT NULL,
+      status TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+    )`
+    this.sql`CREATE TABLE IF NOT EXISTS finding (
+      id TEXT PRIMARY KEY, node_id TEXT NOT NULL, payload TEXT NOT NULL,
+      shared INTEGER NOT NULL, created_at TEXT NOT NULL
+    )`
+  }
+
+  private ensureRootNode(): void {
+    const existing = this.sql<{ id: string }>`SELECT id FROM context_node WHERE id = ${ROOT_NODE_ID}`
+    if (existing.length > 0) return
+    const now = new Date().toISOString()
+    this.sql`INSERT INTO context_node (id, parent_id, kind, goal, status, created_at, updated_at)
+             VALUES (${ROOT_NODE_ID}, NULL, 'root', 'shared context', 'open', ${now}, ${now})`
+  }
+
+  private loadTree(): { nodes: ContextNode[]; findings: Finding[] } {
+    const nodeRows = this.sql<{
+      id: string; parent_id: string | null; kind: string; goal: string; status: string; created_at: string; updated_at: string
+    }>`SELECT id, parent_id, kind, goal, status, created_at, updated_at FROM context_node`
+    const findingRows = this.sql<{
+      id: string; node_id: string; payload: string; shared: number; created_at: string
+    }>`SELECT id, node_id, payload, shared, created_at FROM finding`
+
+    const nodes: ContextNode[] = nodeRows.map((r) => ({
+      id: r.id,
+      parentId: r.parent_id,
+      kind: r.kind as ContextNode['kind'],
+      goal: r.goal,
+      status: r.status as NodeStatus,
+      createdAt: r.created_at,
+      updatedAt: r.updated_at,
+    }))
+    const findings: Finding[] = findingRows.map((r) => ({
+      id: r.id,
+      nodeId: r.node_id,
+      payload: JSON.parse(r.payload) as FindingPayload,
+      shared: Number(r.shared) === 1,
+      createdAt: r.created_at,
+    }))
+    return { nodes, findings }
+  }
+
+  private insertFinding(nodeId: string, payload: FindingPayload, shared: boolean): void {
+    const now = new Date().toISOString()
+    this.sql`INSERT INTO finding (id, node_id, payload, shared, created_at)
+             VALUES (${crypto.randomUUID()}, ${nodeId}, ${JSON.stringify(payload)}, ${shared ? 1 : 0}, ${now})`
+  }
+
+  private setBranchStatus(branchId: string, status: NodeStatus): void {
+    const now = new Date().toISOString()
+    this.sql`UPDATE context_node SET status = ${status}, updated_at = ${now} WHERE id = ${branchId}`
+    this.refreshBranchesState()
+  }
+
+  private refreshBranchesState(): void {
+    const rows = this.sql<{ id: string; goal: string; status: string }>`
+      SELECT id, goal, status FROM context_node WHERE kind = 'branch' ORDER BY created_at`
+    const branches: BranchSummary[] = rows.map((r) => ({ id: r.id, goal: r.goal, status: r.status as NodeStatus }))
+    this.setState({ ...this.state, branches })
+  }
+
+  /** Promote shared candidate-suggestions from the blackboard into state.suggestions. */
+  private promoteFindings(): void {
+    const { findings } = this.loadTree()
+    const existing = new Set(this.state.suggestions.map((s) => JSON.stringify(s.payload)))
+    for (const { suggestion } of synthesizeSuggestions(findings)) {
+      const key = JSON.stringify(suggestion)
+      if (existing.has(key)) continue
+      this.queueSuggestion(suggestion)
+      existing.add(key)
     }
   }
 }
