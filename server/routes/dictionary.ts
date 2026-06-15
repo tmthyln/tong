@@ -1,5 +1,11 @@
 import { Hono } from 'hono'
 import charIdsRoutes from './char-ids'
+import {
+  explainTermInContext,
+  disambiguateTerm,
+  type ExplainEntry,
+  type DisambiguateEntry,
+} from '../lib/agent/explain'
 
 const dictionaryRoutes = new Hono<{ Bindings: Env }>()
 
@@ -390,85 +396,15 @@ dictionaryRoutes.get('/segment', async (c) => {
 dictionaryRoutes.post('/explain', async (c) => {
   const body = await c.req.json<{
     term: string
-    entries: Array<{
-      traditional: string
-      simplified: string
-      pinyin: string
-      definitions: string[]
-    }>
+    entries: ExplainEntry[]
     documentId: number
     chunkId: number
   }>()
 
-  const { term, entries, documentId, chunkId } = body
+  const result = await explainTermInContext(c.env, body)
+  if (!result.ok) return c.json({ error: result.error }, result.status)
 
-  // Fetch the target chunk's order
-  const targetChunk = await c.env.DB
-    .prepare(`SELECT chunk_order FROM text_chunk WHERE id = ? AND source_document_id = ?`)
-    .bind(chunkId, documentId)
-    .first<{ chunk_order: number }>()
-
-  if (!targetChunk) return c.json({ error: 'Chunk not found' }, 404)
-
-  const order = targetChunk.chunk_order
-
-  // Fetch context window: target ± 2 neighbors
-  const { results: contextChunks } = await c.env.DB
-    .prepare(
-      `SELECT content FROM text_chunk
-       WHERE source_document_id = ?
-         AND chunk_order BETWEEN ? AND ?
-       ORDER BY chunk_order`
-    )
-    .bind(documentId, order - 2, order + 2)
-    .all<{ content: string }>()
-
-  const contextText = contextChunks.map((r) => r.content).join('\n\n')
-
-  // Format entries for prompt
-  const formatEntry = (e: typeof entries[0]) =>
-    `${e.traditional} (${e.pinyin}): ${e.definitions.join('; ')}`
-
-  const topEntry = entries[0]
-  const otherEntries = entries.slice(1, 5)
-
-  const topEntryText = topEntry ? formatEntry(topEntry) : term
-  const otherEntriesText = otherEntries.length > 0
-    ? otherEntries.map(formatEntry).join('\n')
-    : '(none)'
-
-  const messages = [
-    {
-      role: 'system' as const,
-      content: 'You are a Chinese language tutor. Give direct, compact explanations in English. Never use filler phrases like "In this passage", "The context suggests", "Here,", or "This word". Start immediately with the meaning or usage.',
-    },
-    {
-      role: 'user' as const,
-      content: `The learner selected: "${term}"
-
-Dictionary entry shown:
-${topEntryText}
-
-Other returned entries (not shown to learner):
-${otherEntriesText}
-
-Text:
-${contextText}
-
-In 1–2 sentences, explain how "${term}" is used here. Skip anything obvious from the dictionary gloss.`,
-    },
-  ]
-
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const result = await c.env.AI.run('@cf/meta/llama-3.3-70b-instruct-fp8-fast' as any, {
-    messages,
-    temperature: 0.3,
-    max_tokens: 250,
-  })
-
-  const explanation = (result as { response?: string }).response ?? ''
-
-  return c.json({ explanation })
+  return c.json({ explanation: result.explanation })
 })
 
 // POST /api/dictionary/disambiguate
@@ -478,87 +414,15 @@ In 1–2 sentences, explain how "${term}" is used here. Skip anything obvious fr
 dictionaryRoutes.post('/disambiguate', async (c) => {
   const body = await c.req.json<{
     term: string
-    entries: Array<{
-      id: number
-      traditional: string
-      simplified: string
-      pinyin: string
-      definitions: string[]
-    }>
+    entries: DisambiguateEntry[]
     documentId: number
     chunkId: number
   }>()
 
-  const { term, entries, documentId, chunkId } = body
+  const result = await disambiguateTerm(c.env, body)
+  if (!result.ok) return c.json({ error: result.error }, result.status)
 
-  // Fetch the target chunk's order
-  const targetChunk = await c.env.DB
-    .prepare(`SELECT chunk_order FROM text_chunk WHERE id = ? AND source_document_id = ?`)
-    .bind(chunkId, documentId)
-    .first<{ chunk_order: number }>()
-
-  if (!targetChunk) return c.json({ error: 'Chunk not found' }, 404)
-
-  const order = targetChunk.chunk_order
-
-  // Fetch context window: target ± 2 neighbors
-  const { results: contextChunks } = await c.env.DB
-    .prepare(
-      `SELECT content FROM text_chunk
-       WHERE source_document_id = ?
-         AND chunk_order BETWEEN ? AND ?
-       ORDER BY chunk_order`
-    )
-    .bind(documentId, order - 2, order + 2)
-    .all<{ content: string }>()
-
-  const contextText = contextChunks.map((r) => r.content).join('\n\n')
-
-  // Format entries as numbered list with IDs
-  const entriesList = entries.map((e, i) =>
-    `${i + 1}. [id=${e.id}] ${e.traditional} (${e.pinyin}): ${e.definitions.join('; ')}`
-  ).join('\n')
-
-  const messages = [
-    {
-      role: 'system' as const,
-      content: 'You are a Chinese language tutor. Give direct, compact explanations in English. Never use filler phrases like "In this passage", "The context suggests", "Here,", or "This word". Start immediately with the meaning or usage.',
-    },
-    {
-      role: 'user' as const,
-      content: `The learner selected: "${term}"
-
-Dictionary entries (numbered):
-${entriesList}
-
-Surrounding text:
-${contextText}
-
-Which entry best matches how "${term}" is used here?
-Reply with JSON: { "entryId": <number>, "explanation": "<1–2 sentences>" }
-The explanation should say which meaning applies and why, without filler phrases.`,
-    },
-  ]
-
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const result = await c.env.AI.run('@cf/meta/llama-3.3-70b-instruct-fp8-fast' as any, {
-    messages,
-    temperature: 0.3,
-    max_tokens: 250,
-    response_format: { type: 'json_object' },
-  })
-
-  const raw = (result as { response?: string }).response ?? '{}'
-  let parsed: { entryId?: unknown; explanation?: unknown } = {}
-  try { parsed = JSON.parse(raw) } catch { /* fall through */ }
-
-  const validIds = new Set(entries.map((e) => e.id))
-  const entryId = typeof parsed.entryId === 'number' && validIds.has(parsed.entryId)
-    ? parsed.entryId
-    : entries[0]?.id
-  const explanation = typeof parsed.explanation === 'string' ? parsed.explanation : ''
-
-  return c.json({ explanation, entryId })
+  return c.json({ explanation: result.explanation, entryId: result.entryId })
 })
 
 // POST /api/dictionary/refresh
