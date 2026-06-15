@@ -4,6 +4,7 @@
 
 name = "tong"
 compatibility_date = "2025-09-27"
+compatibility_flags = ["nodejs_compat"]
 main = "server/index.ts"
 
 [limits]
@@ -23,7 +24,8 @@ enabled = true
 [durable_objects]
 bindings = [
   { name = "LEXICON", class_name = "Lexicon" },
-  { name = "UMAP_CONTAINER", class_name = "UmapContainer" }
+  { name = "UMAP_CONTAINER", class_name = "UmapContainer" },
+  { name = "TRANSLATION_AGENT", class_name = "TranslationAgent" }
 ]
 
 [[migrations]]
@@ -33,6 +35,10 @@ new_sqlite_classes = ["Lexicon"]
 [[migrations]]
 tag = "v2"
 new_sqlite_classes = ["UmapContainer"]
+
+[[migrations]]
+tag = "v3"
+new_sqlite_classes = ["TranslationAgent"]
 
 [[containers]]
 class_name = "UmapContainer"

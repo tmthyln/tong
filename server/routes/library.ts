@@ -254,7 +254,7 @@ libraryRoutes.get('/document/:id/similar', async (c) => {
   }
 
   // 2. Batch-fetch all embeddings (max 20 IDs per call)
-  const vectorBatches: Array<{ id: string; values: number[] } | null>[] = []
+  const vectorBatches: Array<{ id: string; values: number[] } | null> = []
   for (let i = 0; i < chunkIds.length; i += 20) {
     const batch = chunkIds.slice(i, i + 20).map(String)
     // eslint-disable-next-line @typescript-eslint/no-explicit-any

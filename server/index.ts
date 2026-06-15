@@ -1,4 +1,5 @@
 import { Hono } from 'hono'
+import { routeAgentRequest } from 'agents'
 import lexiconRoutes from './routes/lexicon'
 import libraryRoutes from './routes/library'
 import libraryVisualizationRoutes from './routes/library-visualization'
@@ -15,6 +16,7 @@ export { RefreshCedictWorkflow } from './workflows/refresh-cedict'
 export { RefreshCharIdsWorkflow } from './workflows/refresh-char-ids'
 export { Lexicon } from './lexicon'
 export { UmapContainer } from './containers/umap'
+export { TranslationAgent } from './agent/translation-agent'
 
 const app = new Hono<{ Bindings: Env }>()
 
@@ -29,4 +31,10 @@ app.route('/api/knowledge-scope', knowledgeScopeRoutes)
 app.route('/api/preferences', preferencesRoutes)
 app.route('/api/dev/eval', devEvalRoutes)
 
-export default app
+// Agents SDK owns `/agents/*` (WebSocket + RPC for the TranslationAgent);
+// everything else falls through to the Hono app.
+export default {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+    return (await routeAgentRequest(request, env)) ?? app.fetch(request, env, ctx)
+  },
+}
