@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from 'vitest'
-import { createSelfTools } from './tools'
+import { createSelfTools, createUserFacingTools } from './tools'
+import type { SuggestionPayload } from './suggestions'
 
 // Minimal env: dictionarySearch (no active filter) returns [] without DB hits.
 function makeEnv() {
@@ -29,5 +30,41 @@ describe('createSelfTools', () => {
       messages: [],
     } as never)
     expect(out).toEqual([])
+  })
+})
+
+describe('createUserFacingTools', () => {
+  const opts = { toolCallId: 't', messages: [] } as never
+
+  it('exposes the four user-facing tools', () => {
+    const tools = createUserFacingTools({ addSuggestion: () => 'id' })
+    expect(Object.keys(tools).sort()).toEqual([
+      'askUser',
+      'suggestCreateEntity',
+      'suggestDeleteEntity',
+      'suggestTranslation',
+    ])
+  })
+
+  it('each tool queues a suggestion of the right kind and reports the id', async () => {
+    const queued: SuggestionPayload[] = []
+    const tools = createUserFacingTools({
+      addSuggestion: (p) => {
+        queued.push(p)
+        return `sug-${queued.length}`
+      },
+    })
+
+    const t = await tools.suggestTranslation.execute!(
+      { documentId: 1, chunkId: 4, translation: 'hi', rationale: 'fits' },
+      opts,
+    )
+    expect(t).toContain('sug-1')
+
+    await tools.askUser.execute!({ question: 'Which sense?' }, opts)
+    await tools.suggestCreateEntity.execute!({ documentId: 1, chunkId: 4, text: '孔子', entityType: 'PERSON' }, opts)
+    await tools.suggestDeleteEntity.execute!({ documentId: 1, entityId: 9 }, opts)
+
+    expect(queued.map((p) => p.kind)).toEqual(['translation', 'question', 'entity-create', 'entity-delete'])
   })
 })

@@ -2,7 +2,7 @@ import { AIChatAgent } from '@cloudflare/ai-chat'
 import { convertToModelMessages, streamText, stepCountIs } from 'ai'
 import { createWorkersAI } from 'workers-ai-provider'
 import { callable } from 'agents'
-import { createSelfTools } from '../lib/agent/tools'
+import { createSelfTools, createUserFacingTools } from '../lib/agent/tools'
 import {
   explainTermInContext,
   disambiguateTerm,
@@ -13,6 +13,17 @@ import {
 } from '../lib/agent/explain'
 import { INITIAL_FOCUS, reduceFocusBatch, type ActionEvent } from '../lib/agent/actions'
 import type { TranslationAgentState } from '../lib/agent/state'
+import {
+  makeSuggestion,
+  addSuggestion,
+  setSuggestionStatus,
+  findSuggestion,
+  type Suggestion,
+  type SuggestionPayload,
+  type SuggestionStatus,
+} from '../lib/agent/suggestions'
+import { createEntityFromText, deleteEntityCascade, enrichAfterEntityChange } from '../lib/agent/entities'
+import { writeAgentTranslationDraft } from '../lib/translation'
 
 /**
  * Model that drives the agent's reasoning/tool loop. Llama 3.3 70b supports
@@ -49,16 +60,19 @@ type OnChatOptions = Parameters<AIChatAgent<Env>['onChatMessage']>[1]
  * orchestration shell; logic lives in testable functions under `server/lib/agent/`.
  */
 export class TranslationAgent extends AIChatAgent<Env, TranslationAgentState> {
-  initialState: TranslationAgentState = { focus: INITIAL_FOCUS, status: 'idle' }
+  initialState: TranslationAgentState = { focus: INITIAL_FOCUS, status: 'idle', suggestions: [] }
 
   async onChatMessage(onFinish: OnFinish, options?: OnChatOptions): Promise<Response | undefined> {
     const workersai = createWorkersAI({ binding: this.env.AI })
     // `this.name` is the instance name, which we key by userId.
-    const tools = createSelfTools({
-      env: this.env,
-      userId: this.name,
-      documentId: this.state.focus.documentId ?? undefined,
-    })
+    const tools = {
+      ...createSelfTools({
+        env: this.env,
+        userId: this.name,
+        documentId: this.state.focus.documentId ?? undefined,
+      }),
+      ...createUserFacingTools({ addSuggestion: (payload) => this.queueSuggestion(payload) }),
+    }
 
     const result = streamText({
       model: workersai(AGENT_MODEL),
@@ -71,6 +85,18 @@ export class TranslationAgent extends AIChatAgent<Env, TranslationAgentState> {
     })
 
     return result.toUIMessageStreamResponse()
+  }
+
+  /** Append a suggestion to synced state (used by user-facing tools). Returns its id. */
+  private queueSuggestion(payload: SuggestionPayload, originBranchId: string | null = null): string {
+    const suggestion = makeSuggestion({
+      id: crypto.randomUUID(),
+      createdAt: new Date().toISOString(),
+      payload,
+      originBranchId,
+    })
+    this.setState({ ...this.state, suggestions: addSuggestion(this.state.suggestions, suggestion) })
+    return suggestion.id
   }
 
   /**
@@ -97,6 +123,11 @@ export class TranslationAgent extends AIChatAgent<Env, TranslationAgentState> {
    */
   @callable()
   async recordActions(events: ActionEvent[]): Promise<void> {
+    this.appendActions(events)
+  }
+
+  /** Persist actions to the action_log and fold focus into state. */
+  private appendActions(events: ActionEvent[]): void {
     if (events.length === 0) return
 
     this.sql`CREATE TABLE IF NOT EXISTS action_log (
@@ -114,4 +145,85 @@ export class TranslationAgent extends AIChatAgent<Env, TranslationAgentState> {
     const focus = reduceFocusBatch(this.state.focus, events)
     this.setState({ ...this.state, focus })
   }
+
+  /**
+   * Resolve a suggestion: accept (perform the real mutation), dismiss, or answer
+   * a question. On accept the corresponding ActionEvent is logged so the
+   * proactive engine (Phase 6) sees the outcome.
+   */
+  @callable()
+  async resolveSuggestion(
+    id: string,
+    action: 'accept' | 'dismiss' | 'answer',
+    payload?: { translation?: string; answer?: string },
+  ): Promise<ResolveSuggestionResult> {
+    const suggestion = findSuggestion(this.state.suggestions, id)
+    if (!suggestion) return { ok: false, error: 'Suggestion not found' }
+
+    if (action === 'dismiss') {
+      this.markSuggestion(id, 'dismissed')
+      return { ok: true, status: 'dismissed' }
+    }
+
+    if (action === 'answer') {
+      // Question answered — record acceptance; the answer can inform later turns.
+      this.markSuggestion(id, 'accepted')
+      return { ok: true, status: 'accepted' }
+    }
+
+    const outcome = await this.applySuggestion(suggestion, payload)
+    if (!outcome.ok) return { ok: false, error: outcome.error }
+    this.markSuggestion(id, 'accepted')
+    return { ok: true, status: 'accepted', outcome: outcome.message }
+  }
+
+  private markSuggestion(id: string, status: SuggestionStatus): void {
+    this.setState({ ...this.state, suggestions: setSuggestionStatus(this.state.suggestions, id, status) })
+  }
+
+  /** Perform the real mutation behind an accepted suggestion via the shared libs. */
+  private async applySuggestion(
+    s: Suggestion,
+    payload?: { translation?: string },
+  ): Promise<{ ok: true; message: string } | { ok: false; error: string }> {
+    const p = s.payload
+    const at = new Date().toISOString()
+
+    switch (p.kind) {
+      case 'translation': {
+        const content = payload?.translation ?? p.translation
+        const { draftNumber } = await writeAgentTranslationDraft(this.env, p.chunkId, content)
+        this.appendActions([
+          { type: 'translation_saved', documentId: p.documentId, chunkId: p.chunkId, draftNumber, at },
+        ])
+        return { ok: true, message: `Wrote draft ${draftNumber} for chunk ${p.chunkId}.` }
+      }
+      case 'entity-create': {
+        const r = await createEntityFromText(this.env, {
+          text: p.text,
+          entityType: p.entityType,
+          chunkId: p.chunkId,
+          documentId: p.documentId,
+        })
+        if (!r.ok) return { ok: false, error: r.error }
+        this.ctx.waitUntil(enrichAfterEntityChange(this.env, p.chunkId, p.documentId))
+        this.appendActions([
+          { type: 'entity_created', documentId: p.documentId, chunkId: p.chunkId, text: p.text, entityType: p.entityType, at },
+        ])
+        return { ok: true, message: `Created ${r.ids.length} entity occurrence(s).` }
+      }
+      case 'entity-delete': {
+        const r = await deleteEntityCascade(this.env, p.entityId)
+        if (!r.ok) return { ok: false, error: r.error }
+        this.appendActions([{ type: 'entity_deleted', documentId: p.documentId, entityId: p.entityId, at }])
+        return { ok: true, message: `Deleted entity ${p.entityId}.` }
+      }
+      case 'question':
+        return { ok: false, error: 'Questions are resolved with action "answer", not "accept".' }
+    }
+  }
 }
+
+export type ResolveSuggestionResult =
+  | { ok: true; status: SuggestionStatus; outcome?: string }
+  | { ok: false; error: string }

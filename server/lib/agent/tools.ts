@@ -11,6 +11,7 @@ import { searchDictionary } from './dictionary-search'
 import { searchChunksByText } from './semantic-search'
 import { searchEntities } from './entities'
 import { userKnowsTerms } from './lexicon-knowledge'
+import type { SuggestionPayload } from './suggestions'
 
 export interface SelfToolDeps {
   env: Env
@@ -71,6 +72,78 @@ export function createSelfTools(deps: SelfToolDeps): ToolSet {
         terms: z.array(z.string()).min(1).describe('Terms/characters to check'),
       }),
       execute: async ({ terms }) => userKnowsTerms(env, userId, terms),
+    }),
+  }
+}
+
+export interface UserFacingToolDeps {
+  /** Adds a suggestion to the agent's state and returns its id. */
+  addSuggestion: (payload: SuggestionPayload) => string
+}
+
+/**
+ * User-facing tools. Unlike self-tools, these do NOT mutate anything — they
+ * surface a suggestion the user must approve. The real mutation happens later in
+ * the agent's resolveSuggestion RPC. Each returns a short confirmation so the
+ * model knows the suggestion was queued.
+ */
+export function createUserFacingTools(deps: UserFacingToolDeps): ToolSet {
+  return {
+    suggestTranslation: tool({
+      description:
+        'Propose a translation for a specific chunk. The user reviews and accepts/dismisses it — it is NOT applied automatically.',
+      inputSchema: z.object({
+        documentId: z.number().int(),
+        chunkId: z.number().int(),
+        translation: z.string().describe('The proposed English translation'),
+        rationale: z.string().optional().describe('Brief reason, shown to the user'),
+      }),
+      execute: async ({ documentId, chunkId, translation, rationale }) => {
+        const id = deps.addSuggestion({ kind: 'translation', documentId, chunkId, translation, rationale })
+        return `Surfaced translation suggestion ${id}; awaiting the user's response.`
+      },
+    }),
+
+    askUser: tool({
+      description: 'Ask the user a question when you need input or a decision. Optionally offer choices.',
+      inputSchema: z.object({
+        question: z.string(),
+        options: z.array(z.string()).optional().describe('Optional answer choices'),
+      }),
+      execute: async ({ question, options }) => {
+        const id = deps.addSuggestion({ kind: 'question', question, options })
+        return `Asked the user question ${id}; awaiting their answer.`
+      },
+    }),
+
+    suggestCreateEntity: tool({
+      description:
+        'Suggest creating a named entity from text in a chunk (e.g. a person/place the user missed). The user approves before it is created.',
+      inputSchema: z.object({
+        documentId: z.number().int(),
+        chunkId: z.number().int(),
+        text: z.string().describe('Exact text of the entity as it appears in the chunk'),
+        entityType: z.string().describe('Entity type name (must be a configured node type)'),
+        rationale: z.string().optional(),
+      }),
+      execute: async ({ documentId, chunkId, text, entityType, rationale }) => {
+        const id = deps.addSuggestion({ kind: 'entity-create', documentId, chunkId, text, entityType, rationale })
+        return `Surfaced entity-create suggestion ${id}; awaiting the user's response.`
+      },
+    }),
+
+    suggestDeleteEntity: tool({
+      description: 'Suggest deleting an entity that looks wrong or spurious. The user approves before deletion.',
+      inputSchema: z.object({
+        documentId: z.number().int(),
+        entityId: z.number().int(),
+        label: z.string().optional().describe('Entity label, for display'),
+        rationale: z.string().optional(),
+      }),
+      execute: async ({ documentId, entityId, label, rationale }) => {
+        const id = deps.addSuggestion({ kind: 'entity-delete', documentId, entityId, label, rationale })
+        return `Surfaced entity-delete suggestion ${id}; awaiting the user's response.`
+      },
     }),
   }
 }

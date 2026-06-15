@@ -6,6 +6,7 @@
 // (Phase 5).
 
 import type { AgentFocus } from './actions'
+import type { Suggestion } from './suggestions'
 
 export type AgentStatus = 'idle' | 'thinking'
 
@@ -14,4 +15,6 @@ export interface TranslationAgentState {
   focus: AgentFocus
   /** Whether the agent is mid-turn (for a subtle UI indicator). */
   status: AgentStatus
+  /** Pending + resolved suggestions; the UI renders from this list. */
+  suggestions: Suggestion[]
 }
