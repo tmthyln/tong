@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { ref, onMounted, nextTick } from 'vue'
+import { ref, onMounted, onUnmounted, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
 import * as d3 from 'd3'
+import { visibleLayerIndex, type TopicLabel, type TopicLayers } from '@/composables/topicLayers'
 
 const router = useRouter()
 
@@ -35,11 +36,23 @@ const tooltip = ref({
 const CHUNK_COLOR = '#90CAF9'
 const DOC_COLOR = '#EF9A9A'
 
+const POLL_INTERVAL_MS = 3000
+const MAX_POLL_ATTEMPTS = 100
+let pollTimer: number | null = null
+
+onUnmounted(() => {
+  if (pollTimer !== null) window.clearTimeout(pollTimer)
+})
+
 onMounted(async () => {
   try {
     const res = await fetch('/api/library/visualization')
     if (!res.ok) throw new Error(`HTTP ${res.status}`)
-    const data = (await res.json()) as { chunks: ChunkPoint[]; documents: DocPoint[] }
+    const data = (await res.json()) as {
+      chunks: ChunkPoint[]
+      documents: DocPoint[]
+      topicsKey: string | null
+    }
 
     loading.value = false
     await nextTick()
@@ -65,11 +78,96 @@ onMounted(async () => {
 
     const g = svg.append('g')
 
+    // --- Hierarchical topic labels (issue #4) ---
+    const labelRoot = g.append('g').attr('class', 'topic-labels').style('pointer-events', 'none')
+    let topicLayerGroups: d3.Selection<SVGGElement, unknown, null, undefined>[] = []
+    let currentZoomK = 1
+    let lastVisibleLayer = -2
+
+    function updateTopicVisibility(k: number) {
+      if (!topicLayerGroups.length) return
+      const idx = visibleLayerIndex(k, topicLayerGroups.length)
+      if (idx !== lastVisibleLayer) {
+        lastVisibleLayer = idx
+        topicLayerGroups.forEach((group, layerIndex) => {
+          group
+            .transition()
+            .duration(250)
+            .attr('opacity', layerIndex === idx ? 1 : 0)
+            .style('pointer-events', layerIndex === idx ? 'auto' : 'none')
+        })
+      }
+      // Counter-scale so label text keeps a constant on-screen size.
+      labelRoot
+        .selectAll<SVGTextElement, TopicLabel>('text.topic-label')
+        .attr('transform', (d) => `translate(${xScale(d.x)},${yScale(d.y)}) scale(${1 / k})`)
+    }
+
+    function renderTopicLayers(layers: TopicLayers) {
+      labelRoot.raise()
+      labelRoot.selectAll('*').remove()
+      topicLayerGroups = layers.map((layer, layerIndex) => {
+        const group = labelRoot
+          .append('g')
+          .attr('opacity', 0)
+          .style('pointer-events', 'none')
+        group
+          .selectAll('text.topic-label')
+          .data(layer)
+          .enter()
+          .append('text')
+          .attr('class', 'topic-label')
+          .attr('text-anchor', 'middle')
+          .attr('font-size', Math.max(12, 20 - layerIndex * 3))
+          .attr('transform', (d) => `translate(${xScale(d.x)},${yScale(d.y)}) scale(${1 / currentZoomK})`)
+          .text((d) => d.label_zh)
+          .on('mouseenter', (event: MouseEvent, d: TopicLabel) => {
+            tooltip.value = {
+              visible: true,
+              x: event.clientX + 12,
+              y: event.clientY - 8,
+              title: d.label_en || d.label_zh,
+              filename: d.label_zh,
+            }
+          })
+          .on('mousemove', (event: MouseEvent) => {
+            tooltip.value.x = event.clientX + 12
+            tooltip.value.y = event.clientY - 8
+          })
+          .on('mouseleave', () => {
+            tooltip.value.visible = false
+          })
+        return group
+      })
+      lastVisibleLayer = -2
+      updateTopicVisibility(currentZoomK)
+    }
+
+    async function pollTopics(key: string, attempt = 0) {
+      if (attempt >= MAX_POLL_ATTEMPTS) return
+      try {
+        const res = await fetch(`/api/library/visualization/topics?key=${key}`)
+        if (res.ok) {
+          const body = (await res.json()) as { status: string; layers?: TopicLayers }
+          if (body.status === 'ready') {
+            if (body.layers?.length) renderTopicLayers(body.layers)
+            return
+          }
+          if (body.status === 'error') return
+        }
+      } catch {
+        // transient network failure: keep polling
+      }
+      pollTimer = window.setTimeout(() => pollTopics(key, attempt + 1), POLL_INTERVAL_MS)
+    }
+
     const zoom = d3
       .zoom<SVGSVGElement, unknown>()
       .scaleExtent([0.2, 20])
       .on('zoom', (event) => {
         g.attr('transform', event.transform)
+        currentZoomK = event.transform.k
+        updateTopicVisibility(currentZoomK)
       })
 
     svg.call(zoom)
@@ -126,6 +224,8 @@ onMounted(async () => {
       .on('click', (_event: MouseEvent, d: DocPoint) => {
         router.push(`/document/${d.id}`)
       })
+
+    if (data.topicsKey) pollTopics(data.topicsKey)
   } catch (e) {
     loading.value = false
     error.value = e instanceof Error ? e.message : 'Failed to load visualization'
@@ -184,6 +284,16 @@ onMounted(async () => {
   inset: 0;
   width: 100%;
   height: 100%;
+}
+
+.viz-svg :deep(.topic-label) {
+  font-weight: 600;
+  fill: rgb(var(--v-theme-on-surface));
+  paint-order: stroke;
+  stroke: rgb(var(--v-theme-surface));
+  stroke-width: 4px;
+  stroke-linejoin: round;
+  cursor: default;
 }
 
 .viz-center {
