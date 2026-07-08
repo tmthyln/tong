@@ -16,6 +16,8 @@ export { RefreshCedictWorkflow } from './workflows/refresh-cedict'
 export { RefreshCharIdsWorkflow } from './workflows/refresh-char-ids'
 export { Lexicon } from './lexicon'
 export { UmapContainer } from './containers/umap'
+// Required by @cloudflare/containers outbound interception (outboundByHost).
+export { ContainerProxy } from '@cloudflare/containers'
 export { TranslationAgent } from './agent/translation-agent'
 
 const app = new Hono<{ Bindings: Env }>()
