@@ -137,7 +137,16 @@ onMounted(async () => {
   <div class="viz-root">
     <svg ref="svgRef" v-show="!loading && !error" class="viz-svg" />
 
-    <v-progress-circular v-if="loading" indeterminate class="viz-center" />
+    <div v-if="loading" class="viz-center text-center">
+      <v-progress-circular indeterminate />
+      <p class="text-body-2 text-medium-emphasis mt-4 mb-1">
+        Building the document map
+      </p>
+      <p class="text-caption text-medium-emphasis viz-loading-detail">
+        Fetching embeddings for your documents and semantically visualizing them
+        so similar documents appear near each other. This can take a moment.
+      </p>
+    </div>
 
     <v-alert v-if="error" type="error" class="viz-alert">
       {{ error }}
@@ -182,6 +191,10 @@ onMounted(async () => {
   top: 50%;
   left: 50%;
   transform: translate(-50%, -50%);
+}
+
+.viz-loading-detail {
+  max-width: 340px;
 }
 
 .viz-alert {
