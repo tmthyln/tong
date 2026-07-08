@@ -50,9 +50,9 @@ const router = createRouter({
       component: () => import('../views/SettingsView.vue'),
     },
     {
-      path: '/evaluations',
-      name: 'evaluations',
-      component: () => import('../views/EvaluationsView.vue'),
+      path: '/cookoffs',
+      name: 'cookoffs',
+      component: () => import('../views/CookoffsView.vue'),
     },
   ],
 })

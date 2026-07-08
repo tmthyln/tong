@@ -13,6 +13,12 @@ const features = [
     description: 'Look up any Chinese word with definitions, pinyin, and example usage.',
   },
   {
+    title: 'Documents',
+    icon: 'mdi-file-document-outline',
+    to: '/document',
+    description: 'Read documents side-by-side with translation drafts, annotated with known entities.',
+  },
+  {
     title: 'Lexicon',
     icon: 'mdi-format-list-bulleted-type',
     to: '/lexicon',
@@ -25,10 +31,22 @@ const features = [
     description: 'Entities extracted from your reading — people, places, events — shown as a connected graph.',
   },
   {
-    title: 'Translation',
-    icon: 'mdi-translate',
-    to: '/library',
-    description: 'Translate passages and documents into English with or without smart AI assistance.',
+    title: 'Knowledge Scopes',
+    icon: 'mdi-layers-triple-outline',
+    to: '/knowledge-scopes',
+    description: 'Organize your documents into a hierarchy of scopes for entity and relationship extraction.',
+  },
+  {
+    title: 'Cookoffs',
+    icon: 'mdi-pot-steam-outline',
+    to: '/cookoffs',
+    description: 'Compare entity and relationship extraction approaches head-to-head.',
+  },
+  {
+    title: 'Settings',
+    icon: 'mdi-cog',
+    to: '/settings',
+    description: 'Configure entity types, edge types, and other preferences for your workspace.',
   },
 ]
 </script>

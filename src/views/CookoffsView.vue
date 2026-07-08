@@ -8,7 +8,7 @@ const tab = ref<'entity' | 'relationship'>('entity')
 
 <template>
   <v-container fluid class="pa-6">
-    <h1 class="text-h4 mb-1">Evaluations</h1>
+    <h1 class="text-h4 mb-1">Cookoffs</h1>
 
     <v-tabs v-model="tab" class="mb-4" color="primary" density="compact">
       <v-tab value="entity">Entity extraction</v-tab>
