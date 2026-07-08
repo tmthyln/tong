@@ -97,7 +97,9 @@ libraryVisualizationRoutes.get('/', async (c) => {
   })
 
   if (!reduceResponse.ok) {
-    return c.json({ error: 'UMAP reduction failed' }, 500)
+    const detail = (await reduceResponse.text()).slice(0, 300)
+    console.error('[viz] container /reduce failed', reduceResponse.status, detail)
+    return c.json({ error: 'UMAP reduction failed', detail }, 500)
   }
 
   const { coords, topicsKey } = (await reduceResponse.json()) as ReduceResponse
@@ -130,8 +132,13 @@ libraryVisualizationRoutes.get('/topics', async (c) => {
     return c.json({ status: 'error', error: 'invalid key' }, 400)
   }
   const response = await getUmapContainer(c.env).fetch(`http://localhost/topics/${key}`)
+  if (!response.ok) {
+    // The Container DO answers with plain text when the container can't start.
+    const detail = (await response.text()).slice(0, 300)
+    return c.json({ status: 'error', error: detail }, 502)
+  }
   const body = (await response.json()) as Record<string, unknown>
-  return c.json(body, response.ok ? 200 : 502)
+  return c.json(body)
 })
 
 export default libraryVisualizationRoutes

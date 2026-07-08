@@ -44,3 +44,4 @@ __screenshots__/
 
 # Python container test venv
 container/.venv
+container/__pycache__/
