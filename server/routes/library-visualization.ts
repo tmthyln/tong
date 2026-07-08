@@ -3,6 +3,44 @@ import { Hono } from 'hono'
 // VectorizeVector is a global type from worker-configuration.d.ts
 type VectorizeVector = { id: string; values: Float32Array | number[]; namespace?: string; metadata?: Record<string, unknown> }
 
+interface ReduceResponse {
+  coords: [number, number][]
+  topicsKey?: string | null
+}
+
+export interface ChunkRow {
+  id: number
+  source_document_id: number
+}
+
+export function isValidTopicsKey(key: string): boolean {
+  return /^[0-9a-f]{16}$/.test(key)
+}
+
+export function computeDocMaxVectors(
+  chunks: ChunkRow[],
+  vectorMap: Map<string, number[]>
+): Map<number, number[]> {
+  const docVectorMap = new Map<number, number[]>()
+  for (const chunk of chunks) {
+    const vec = vectorMap.get(String(chunk.id))
+    if (!vec) continue
+    const existing = docVectorMap.get(chunk.source_document_id)
+    if (!existing) {
+      docVectorMap.set(chunk.source_document_id, vec.slice())
+    } else {
+      for (let d = 0; d < vec.length; d++) {
+        if (vec[d] > existing[d]) existing[d] = vec[d]
+      }
+    }
+  }
+  return docVectorMap
+}
+
+function getUmapContainer(env: Env) {
+  return env.UMAP_CONTAINER.get(env.UMAP_CONTAINER.idFromName('singleton'))
+}
+
 const libraryVisualizationRoutes = new Hono<{ Bindings: Env }>()
 
 libraryVisualizationRoutes.get('/', async (c) => {
@@ -11,10 +49,10 @@ libraryVisualizationRoutes.get('/', async (c) => {
     'SELECT id, title, original_doc_filename FROM document ORDER BY id'
   ).all<{ id: number; title: string | null; original_doc_filename: string }>()
 
-  // 2. Query all chunks
+  // 2. Query all chunks (content feeds the topic-labeling job)
   const chunksResult = await c.env.DB.prepare(
-    'SELECT id, source_document_id FROM text_chunk ORDER BY id'
-  ).all<{ id: number; source_document_id: number }>()
+    'SELECT id, source_document_id, content FROM text_chunk ORDER BY id'
+  ).all<{ id: number; source_document_id: number; content: string }>()
 
   const allChunkIds = chunksResult.results.map((c) => String(c.id))
 
@@ -36,19 +74,7 @@ libraryVisualizationRoutes.get('/', async (c) => {
   const chunkVectors = chunksWithVectors.map((chunk) => vectorMap.get(String(chunk.id))!)
 
   // 5. Compute per-document elementwise max embeddings
-  const docVectorMap = new Map<number, number[]>()
-  for (const chunk of chunksWithVectors) {
-    const vec = vectorMap.get(String(chunk.id))!
-    const docId = chunk.source_document_id
-    const existing = docVectorMap.get(docId)
-    if (!existing) {
-      docVectorMap.set(docId, vec.slice())
-    } else {
-      for (let d = 0; d < vec.length; d++) {
-        if (vec[d] > existing[d]) existing[d] = vec[d]
-      }
-    }
-  }
+  const docVectorMap = computeDocMaxVectors(chunksWithVectors, vectorMap)
 
   // Only include documents that have at least one chunk with a vector
   const docsWithVectors = docsResult.results.filter((doc) => docVectorMap.has(doc.id))
@@ -57,16 +83,16 @@ libraryVisualizationRoutes.get('/', async (c) => {
   // Need at least 2 points to run UMAP
   const totalPoints = chunkVectors.length + docMaxVectors.length
   if (totalPoints < 2) {
-    return c.json({ chunks: [], documents: [] })
+    return c.json({ chunks: [], documents: [], topicsKey: null })
   }
 
-  // 6. Call UMAP container
-  const container = c.env.UMAP_CONTAINER.get(c.env.UMAP_CONTAINER.idFromName('singleton'))
-  const reduceResponse = await container.fetch('http://localhost/reduce', {
+  // 6. Call UMAP container; chunk vectors first so texts align with them
+  const reduceResponse = await getUmapContainer(c.env).fetch('http://localhost/reduce', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       vectors: [...chunkVectors, ...docMaxVectors],
+      texts: chunksWithVectors.map((chunk) => chunk.content),
     }),
   })
 
@@ -74,7 +100,7 @@ libraryVisualizationRoutes.get('/', async (c) => {
     return c.json({ error: 'UMAP reduction failed' }, 500)
   }
 
-  const { coords } = (await reduceResponse.json()) as { coords: [number, number][] }
+  const { coords, topicsKey } = (await reduceResponse.json()) as ReduceResponse
 
   // 7. Split coords at chunksWithVectors.length offset
   const chunkCoords = coords.slice(0, chunksWithVectors.length)
@@ -94,7 +120,18 @@ libraryVisualizationRoutes.get('/', async (c) => {
       x: docCoords[i][0],
       y: docCoords[i][1],
     })),
+    topicsKey: topicsKey ?? null,
   })
+})
+
+libraryVisualizationRoutes.get('/topics', async (c) => {
+  const key = c.req.query('key')
+  if (!key || !isValidTopicsKey(key)) {
+    return c.json({ status: 'error', error: 'invalid key' }, 400)
+  }
+  const response = await getUmapContainer(c.env).fetch(`http://localhost/topics/${key}`)
+  const body = (await response.json()) as Record<string, unknown>
+  return c.json(body, response.ok ? 200 : 502)
 })
 
 export default libraryVisualizationRoutes
