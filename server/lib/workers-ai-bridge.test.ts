@@ -23,7 +23,7 @@ describe('handleWorkersAiRequest /chat', () => {
       choices: [{ message: { content: '{"topic_name": "唐诗"}' } }],
     })
     const res = await handleWorkersAiRequest(
-      post('/chat', { messages: [{ role: 'user', content: 'hi' }], temperature: 0.2, max_tokens: 64 }),
+      post('/chat', { messages: [{ role: 'user', content: 'hi' }], temperature: 0.2, max_tokens: 2048 }),
       makeEnv(run)
     )
     expect(res.status).toBe(200)
@@ -31,7 +31,8 @@ describe('handleWorkersAiRequest /chat', () => {
     expect(run).toHaveBeenCalledWith(TOPIC_NAMING_MODEL, {
       messages: [{ role: 'user', content: 'hi' }],
       temperature: 0.2,
-      max_tokens: 64,
+      max_completion_tokens: 2048,
+      chat_template_kwargs: { thinking: false },
     })
   })
 
@@ -45,7 +46,8 @@ describe('handleWorkersAiRequest /chat', () => {
     expect(run).toHaveBeenCalledWith(TOPIC_NAMING_MODEL, {
       messages: [{ role: 'user', content: 'hi' }],
       temperature: 0.4,
-      max_tokens: 256,
+      max_completion_tokens: 1024,
+      chat_template_kwargs: { thinking: false },
     })
   })
 

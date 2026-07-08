@@ -55,7 +55,10 @@ async function handleChat(request: Request, env: Env): Promise<Response> {
   const result = (await (env.AI.run as AiRun)(TOPIC_NAMING_MODEL, {
     messages: body.messages,
     temperature: body.temperature ?? 0.4,
-    max_tokens: body.max_tokens ?? 256,
+    // kimi-k2.6 ignores max_tokens; it wants max_completion_tokens. Thinking
+    // mode must be off or reasoning eats the budget before the JSON answer.
+    max_completion_tokens: Math.max(body.max_tokens ?? 1024, 1024),
+    chat_template_kwargs: { thinking: false },
   })) as ChatCompletionResponse
   const content = result.choices?.[0]?.message?.content ?? result.response ?? ''
   return Response.json({ content })

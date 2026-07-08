@@ -38,6 +38,9 @@ class WorkersAINamer(LLMWrapper):
     """Toponymy LLM wrapper backed by kimi-k2.6 via the Workers AI bridge."""
 
     supports_system_prompts = True
+    # Toponymy defaults topic-name calls to 128 tokens, which truncates JSON
+    # answers from chat models; it reads this attribute when present.
+    max_tokens_topic_name = 1024
 
     def __init__(self, client: WorkersAIClient, llm_specific_instructions: Optional[str] = None):
         self.client = client
