@@ -13,7 +13,9 @@ import {
   startEnrichmentRun,
   completeEnrichmentRun,
   failEnrichmentRun,
+  computeProcessingStatus,
   type OntologyRef,
+  type EnrichmentRunSummary,
 } from '../lib/enrichment-run'
 
 const libraryRoutes = new Hono<{ Bindings: Env }>()
@@ -217,20 +219,47 @@ libraryRoutes.get('/document', async (c) => {
     .bind(...bindings)
     .all()
 
-  const documents = result.results.slice(0, limit)
+  const documents = result.results.slice(0, limit) as Array<
+    Record<string, unknown> & { id: number; effective_date: string }
+  >
   const hasMore = result.results.length > limit
 
   let responseNextToken: string | null = null
   if (hasMore && documents.length > 0) {
-    const lastDoc = documents[documents.length - 1] as {
-      id: number
-      effective_date: string
-    }
+    const lastDoc = documents[documents.length - 1]
     responseNextToken = btoa(JSON.stringify({ date: lastDoc.effective_date, id: lastDoc.id }))
   }
 
+  const docIds = documents.map((d) => d.id)
+  const statusByDocId = new Map<number, ReturnType<typeof computeProcessingStatus>>()
+  if (docIds.length > 0) {
+    const placeholders = docIds.map(() => '?').join(', ')
+    const runsResult = await c.env.DB.prepare(
+      `SELECT document_id, id, kind, status, started_at
+       FROM document_enrichment_run
+       WHERE document_id IN (${placeholders})`
+    )
+      .bind(...docIds)
+      .all<{ document_id: number; id: number; kind: string; status: string; started_at: string }>()
+
+    const runsByDoc = new Map<number, EnrichmentRunSummary[]>()
+    for (const r of runsResult.results) {
+      const list = runsByDoc.get(r.document_id) ?? []
+      list.push({ id: r.id, kind: r.kind, status: r.status, startedAt: r.started_at })
+      runsByDoc.set(r.document_id, list)
+    }
+    for (const id of docIds) {
+      statusByDocId.set(id, computeProcessingStatus(runsByDoc.get(id) ?? []))
+    }
+  }
+
+  const documentsWithStatus = documents.map((d) => ({
+    ...d,
+    processing_status: statusByDocId.get(d.id) ?? 'pending',
+  }))
+
   return c.json({
-    documents,
+    documents: documentsWithStatus,
     nextToken: responseNextToken,
   })
 })
@@ -1161,7 +1190,7 @@ async function runScopePromotionAsync(
   const ontology = await loadOntologyForRun(env.DB)
   const runId = await startEnrichmentRun(env.DB, {
     documentId: triggerDocumentId,
-    kind: 'scope_promotion',
+    kind: 'entity_resolution',
     model: SCOPE_PROMOTION_MODEL,
     params: { knowledge_scope_id: knowledgeScopeId, trigger: 'late_assignment' },
     ontology,
@@ -1181,7 +1210,7 @@ async function runScopePromotionAsync(
       const retroRelResult = await promoteDocumentRelationshipsToScope(m, knowledgeScopeId, env)
       const retroId = await startEnrichmentRun(env.DB, {
         documentId: m,
-        kind: 'scope_promotion_retroactive',
+        kind: 'entity_resolution_retroactive',
         model: SCOPE_PROMOTION_MODEL,
         params: {
           knowledge_scope_id: knowledgeScopeId,
@@ -1239,15 +1268,47 @@ libraryRoutes.post('/document', async (c) => {
   // A document uploaded into a folder inherits that folder's nearest-ancestor
   // knowledge-scope affinity (it has no scope of its own yet).
   const knowledgeScopeId = await resolveFolderAffinity(c.env.DB, folderId)
+  const dateUploaded = new Date().toISOString()
+
+  // Create the document row immediately (extraction fields are NULL until the
+  // workflow's first phase completes) so it shows up as "Pending" right away,
+  // and so a failed extraction still leaves a visible row.
+  const created = await c.env.DB.prepare(
+    `INSERT INTO document (
+      original_doc_location,
+      original_doc_filename,
+      original_doc_mimetype,
+      original_doc_content_hash,
+      date_uploaded,
+      parent_id,
+      knowledge_scope_id
+    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+    RETURNING id`
+  )
+    .bind(
+      fileInfo.location,
+      fileInfo.filename,
+      fileInfo.mimetype,
+      fileInfo.contentHash,
+      dateUploaded,
+      folderId,
+      knowledgeScopeId
+    )
+    .first<{ id: number }>()
+
+  if (!created) {
+    return c.json({ error: 'Failed to create document record' }, 500)
+  }
 
   // Kick off the ingestion workflow for new documents
   const instance = await c.env.INGEST_DOCUMENT_WORKFLOW.create({
     params: {
+      documentId: created.id,
       location: fileInfo.location,
       filename: fileInfo.filename,
       mimetype: fileInfo.mimetype,
       contentHash: fileInfo.contentHash,
-      dateUploaded: new Date().toISOString(),
+      dateUploaded,
       parentId: folderId,
       knowledgeScopeId,
     },
@@ -1257,6 +1318,7 @@ libraryRoutes.post('/document', async (c) => {
     {
       message: 'Document uploaded and processing started',
       workflowId: instance.id,
+      documentId: created.id,
       alreadyExists: false,
     },
     201
