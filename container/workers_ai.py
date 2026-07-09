@@ -20,7 +20,7 @@ class WorkersAIClient:
         self.base_url = base_url.rstrip("/")
         self.client = client or httpx.Client(timeout=httpx.Timeout(120.0))
 
-    def chat(self, messages: list[dict], temperature: float = 0.4, max_tokens: int = 256) -> str:
+    def chat(self, messages: list[dict], temperature: float = 0.4, max_tokens: int = 1024) -> str:
         response = self.client.post(
             f"{self.base_url}/chat",
             json={"messages": messages, "temperature": temperature, "max_tokens": max_tokens},
@@ -70,17 +70,16 @@ class WorkersAINamer(LLMWrapper):
 
 
 class WorkersAIEmbedder:
-    """Satisfies toponymy's TextEmbedderProtocol via the Workers AI bridge."""
+    """Satisfies toponymy's TextEmbedderProtocol via the Workers AI bridge.
 
-    def __init__(self, client: WorkersAIClient, batch_size: int = 90):
+    Sends all texts in one request; the bridge owns model batch limits.
+    """
+
+    def __init__(self, client: WorkersAIClient):
         self.client = client
-        self.batch_size = batch_size
 
     def encode(self, texts, show_progress_bar=None, **kwargs) -> np.ndarray:
         texts = list(texts)
         if not texts:
             return np.zeros((0, 1), dtype=np.float32)
-        vectors: list[list[float]] = []
-        for i in range(0, len(texts), self.batch_size):
-            vectors.extend(self.client.embed(texts[i : i + self.batch_size]))
-        return np.asarray(vectors, dtype=np.float32)
+        return np.asarray(self.client.embed(texts), dtype=np.float32)

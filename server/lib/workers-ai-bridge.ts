@@ -4,6 +4,10 @@
 export const TOPIC_NAMING_MODEL = '@cf/moonshotai/kimi-k2.6'
 export const KEYPHRASE_EMBEDDING_MODEL = '@cf/google/embeddinggemma-300m'
 
+// Single owner of the virtual hostname: umap.ts uses it as the interception
+// key and injects it into the container as WORKERS_AI_BASE_URL.
+export const WORKERS_AI_VIRTUAL_HOST = 'workers-ai.tong'
+
 const EMBED_BATCH_SIZE = 90
 
 interface ChatMessage {
@@ -57,7 +61,8 @@ async function handleChat(request: Request, env: Env): Promise<Response> {
     temperature: body.temperature ?? 0.4,
     // kimi-k2.6 ignores max_tokens; it wants max_completion_tokens. Thinking
     // mode must be off or reasoning eats the budget before the JSON answer.
-    max_completion_tokens: Math.max(body.max_tokens ?? 1024, 1024),
+    // Token-budget policy lives in the Python caller (workers_ai.py).
+    max_completion_tokens: body.max_tokens ?? 1024,
     chat_template_kwargs: { thinking: false },
   })) as ChatCompletionResponse
   const content = result.choices?.[0]?.message?.content ?? result.response ?? ''
@@ -69,12 +74,14 @@ async function handleEmbed(request: Request, env: Env): Promise<Response> {
   if (!Array.isArray(body.texts) || body.texts.length === 0) {
     return Response.json({ error: 'texts required' }, { status: 400 })
   }
-  const vectors: number[][] = []
+  const batches: Promise<EmbeddingResponse>[] = []
   for (let i = 0; i < body.texts.length; i += EMBED_BATCH_SIZE) {
-    const result = (await (env.AI.run as AiRun)(KEYPHRASE_EMBEDDING_MODEL, {
-      text: body.texts.slice(i, i + EMBED_BATCH_SIZE),
-    })) as EmbeddingResponse
-    vectors.push(...(result.data ?? []))
+    batches.push(
+      (env.AI.run as AiRun)(KEYPHRASE_EMBEDDING_MODEL, {
+        text: body.texts.slice(i, i + EMBED_BATCH_SIZE),
+      }) as Promise<EmbeddingResponse>
+    )
   }
-  return Response.json({ vectors })
+  const results = await Promise.all(batches)
+  return Response.json({ vectors: results.flatMap((r) => r.data ?? []) })
 }

@@ -2,7 +2,7 @@
 import { ref, onMounted, onUnmounted, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
 import * as d3 from 'd3'
-import { visibleLayerIndex, type TopicLabel, type TopicLayers } from '@/composables/topicLayers'
+import { visibleLayerIndex, ZOOM_EXTENT, type TopicLabel, type TopicLayers } from '@/composables/topicLayers'
 
 const router = useRouter()
 
@@ -44,6 +44,19 @@ onUnmounted(() => {
   if (pollTimer !== null) window.clearTimeout(pollTimer)
 })
 
+function showTooltip(event: MouseEvent, title: string, subtitle: string) {
+  tooltip.value = { visible: true, x: event.clientX + 12, y: event.clientY - 8, title, filename: subtitle }
+}
+
+function moveTooltip(event: MouseEvent) {
+  tooltip.value.x = event.clientX + 12
+  tooltip.value.y = event.clientY - 8
+}
+
+function hideTooltip() {
+  tooltip.value.visible = false
+}
+
 onMounted(async () => {
   try {
     const res = await fetch('/api/library/visualization')
@@ -81,26 +94,34 @@ onMounted(async () => {
     // --- Hierarchical topic labels (issue #4) ---
     const labelRoot = g.append('g').attr('class', 'topic-labels').style('pointer-events', 'none')
     let topicLayerGroups: d3.Selection<SVGGElement, unknown, null, undefined>[] = []
+    let labelSelection: d3.Selection<SVGTextElement, TopicLabel, SVGGElement, unknown> | null = null
     let currentZoomK = 1
     let lastVisibleLayer = -2
+    let lastAppliedK = -1
+
+    function fadeLayer(layerIndex: number, visible: boolean) {
+      topicLayerGroups[layerIndex]
+        ?.transition()
+        .duration(250)
+        .attr('opacity', visible ? 1 : 0)
+        .style('pointer-events', visible ? 'auto' : 'none')
+    }
 
     function updateTopicVisibility(k: number) {
       if (!topicLayerGroups.length) return
       const idx = visibleLayerIndex(k, topicLayerGroups.length)
       if (idx !== lastVisibleLayer) {
+        // Only the outgoing and incoming layers need a transition.
+        if (lastVisibleLayer >= 0) fadeLayer(lastVisibleLayer, false)
+        fadeLayer(idx, true)
         lastVisibleLayer = idx
-        topicLayerGroups.forEach((group, layerIndex) => {
-          group
-            .transition()
-            .duration(250)
-            .attr('opacity', layerIndex === idx ? 1 : 0)
-            .style('pointer-events', layerIndex === idx ? 'auto' : 'none')
-        })
       }
-      // Counter-scale so label text keeps a constant on-screen size.
-      labelRoot
-        .selectAll<SVGTextElement, TopicLabel>('text.topic-label')
-        .attr('transform', (d) => `translate(${xScale(d.x)},${yScale(d.y)}) scale(${1 / k})`)
+      // Counter-scale so label text keeps a constant on-screen size. Pure pans
+      // keep k unchanged, so skip the O(labels) attribute writes then.
+      if (k !== lastAppliedK && labelSelection) {
+        lastAppliedK = k
+        labelSelection.attr('transform', (d) => `translate(${xScale(d.x)},${yScale(d.y)}) scale(${1 / k})`)
+      }
     }
 
     function renderTopicLayers(layers: TopicLayers) {
@@ -121,25 +142,14 @@ onMounted(async () => {
           .attr('font-size', Math.max(12, 20 - layerIndex * 3))
           .attr('transform', (d) => `translate(${xScale(d.x)},${yScale(d.y)}) scale(${1 / currentZoomK})`)
           .text((d) => d.label_zh)
-          .on('mouseenter', (event: MouseEvent, d: TopicLabel) => {
-            tooltip.value = {
-              visible: true,
-              x: event.clientX + 12,
-              y: event.clientY - 8,
-              title: d.label_en || d.label_zh,
-              filename: d.label_zh,
-            }
-          })
-          .on('mousemove', (event: MouseEvent) => {
-            tooltip.value.x = event.clientX + 12
-            tooltip.value.y = event.clientY - 8
-          })
-          .on('mouseleave', () => {
-            tooltip.value.visible = false
-          })
+          .on('mouseenter', (event: MouseEvent, d: TopicLabel) => showTooltip(event, d.label_en || d.label_zh, d.label_zh))
+          .on('mousemove', moveTooltip)
+          .on('mouseleave', hideTooltip)
         return group
       })
+      labelSelection = labelRoot.selectAll<SVGTextElement, TopicLabel>('text.topic-label')
       lastVisibleLayer = -2
+      lastAppliedK = -1
       updateTopicVisibility(currentZoomK)
     }
 
@@ -163,7 +173,7 @@ onMounted(async () => {
 
     const zoom = d3
       .zoom<SVGSVGElement, unknown>()
-      .scaleExtent([0.2, 20])
+      .scaleExtent(ZOOM_EXTENT)
       .on('zoom', (event) => {
         g.attr('transform', event.transform)
         currentZoomK = event.transform.k
@@ -204,22 +214,12 @@ onMounted(async () => {
         // Dim non-matching chunks, highlight matching
         chunkDots
           .attr('opacity', (c) => (c.documentId === d.id ? 0.85 : 0.1))
-
-        tooltip.value = {
-          visible: true,
-          x: event.clientX + 12,
-          y: event.clientY - 8,
-          title: d.title ?? d.filename,
-          filename: d.filename,
-        }
+        showTooltip(event, d.title ?? d.filename, d.filename)
       })
-      .on('mousemove', function (event: MouseEvent) {
-        tooltip.value.x = event.clientX + 12
-        tooltip.value.y = event.clientY - 8
-      })
+      .on('mousemove', moveTooltip)
       .on('mouseleave', function () {
         chunkDots.attr('opacity', 0.6)
-        tooltip.value.visible = false
+        hideTooltip()
       })
       .on('click', (_event: MouseEvent, d: DocPoint) => {
         router.push(`/document/${d.id}`)

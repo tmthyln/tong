@@ -60,7 +60,7 @@ def test_namer_implements_toponymy_interface():
     assert out == "USER\n\n用中文命名。"
 
 
-def test_embedder_batches_and_returns_array():
+def test_embedder_sends_one_request_and_returns_array():
     calls = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -68,11 +68,12 @@ def test_embedder_batches_and_returns_array():
         calls.append(len(body["texts"]))
         return httpx.Response(200, json={"vectors": [[0.1, 0.2]] * len(body["texts"])})
 
-    embedder = WorkersAIEmbedder(make_client(handler), batch_size=90)
+    embedder = WorkersAIEmbedder(make_client(handler))
     result = embedder.encode([f"t{i}" for i in range(200)], show_progress_bar=False)
     assert isinstance(result, np.ndarray)
     assert result.shape == (200, 2)
-    assert calls == [90, 90, 20]
+    # Batching by model limit is the bridge's job; the client sends one request.
+    assert calls == [200]
 
 
 def test_embedder_empty_input():

@@ -13,8 +13,10 @@ export interface ChunkRow {
   source_document_id: number
 }
 
+// The key is minted by (and opaque to everyone but) the container; only check
+// that it is URL-safe, not its format.
 export function isValidTopicsKey(key: string): boolean {
-  return /^[0-9a-f]{16}$/.test(key)
+  return /^[A-Za-z0-9_-]{1,64}$/.test(key)
 }
 
 export function computeDocMaxVectors(
@@ -37,6 +39,9 @@ export function computeDocMaxVectors(
   return docVectorMap
 }
 
+// Not @cloudflare/containers' getContainer: importing that package here pulls
+// the workerd-only `cloudflare:workers` module into this file's pure helpers,
+// breaking node-run vitest.
 function getUmapContainer(env: Env) {
   return env.UMAP_CONTAINER.get(env.UMAP_CONTAINER.idFromName('singleton'))
 }
@@ -137,8 +142,8 @@ libraryVisualizationRoutes.get('/topics', async (c) => {
     const detail = (await response.text()).slice(0, 300)
     return c.json({ status: 'error', error: detail }, 502)
   }
-  const body = (await response.json()) as Record<string, unknown>
-  return c.json(body)
+  // Pure passthrough — no need to parse and re-serialize the container's JSON.
+  return new Response(response.body, { headers: { 'Content-Type': 'application/json' } })
 })
 
 export default libraryVisualizationRoutes

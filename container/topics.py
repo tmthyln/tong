@@ -119,12 +119,9 @@ def compute_topics(
             layers.append(entries)
     layers.reverse()
 
-    all_labels = [entry["label_zh"] for layer in layers for entry in layer]
-    glosses = translate_labels(all_labels, namer.client)
-    i = 0
-    for layer in layers:
-        for entry in layer:
-            entry["label_en"] = glosses[i]
-            i += 1
+    all_entries = [entry for layer in layers for entry in layer]
+    glosses = translate_labels([entry["label_zh"] for entry in all_entries], namer.client)
+    for entry, gloss in zip(all_entries, glosses):
+        entry["label_en"] = gloss
 
     return layers

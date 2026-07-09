@@ -2,14 +2,15 @@ import { describe, it, expect } from 'vitest'
 import { computeDocMaxVectors, isValidTopicsKey } from './library-visualization'
 
 describe('isValidTopicsKey', () => {
-  it('accepts 16 lowercase hex chars', () => {
+  it('accepts opaque URL-safe tokens', () => {
     expect(isValidTopicsKey('deadbeef01234567')).toBe(true)
+    expect(isValidTopicsKey('AbC-123_xyz')).toBe(true)
   })
-  it('rejects wrong length, uppercase, and path-traversal input', () => {
-    expect(isValidTopicsKey('deadbeef')).toBe(false)
-    expect(isValidTopicsKey('DEADBEEF01234567')).toBe(false)
+  it('rejects path-traversal, empty, and oversized input', () => {
     expect(isValidTopicsKey('../secrets/xxxxx')).toBe(false)
+    expect(isValidTopicsKey('a/b')).toBe(false)
     expect(isValidTopicsKey('')).toBe(false)
+    expect(isValidTopicsKey('x'.repeat(65))).toBe(false)
   })
 })
 
