@@ -99,6 +99,11 @@ export async function extractContent(
   mimetype: string,
   env: Env
 ): Promise<ExtractedContent> {
+  // Reject unsupported mimetypes before fetching the file
+  if (!isTextMimetype(mimetype) && !isAiConvertibleMimetype(mimetype)) {
+    throw new Error(`Unsupported mimetype: ${mimetype}`)
+  }
+
   // Fetch original file from R2
   const object = await env.DOCUMENTS.get(location)
   if (!object) {
