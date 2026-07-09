@@ -13,7 +13,9 @@ import {
   startEnrichmentRun,
   completeEnrichmentRun,
   failEnrichmentRun,
+  computeProcessingStatus,
   type OntologyRef,
+  type EnrichmentRunSummary,
 } from '../lib/enrichment-run'
 
 const libraryRoutes = new Hono<{ Bindings: Env }>()
@@ -217,20 +219,47 @@ libraryRoutes.get('/document', async (c) => {
     .bind(...bindings)
     .all()
 
-  const documents = result.results.slice(0, limit)
+  const documents = result.results.slice(0, limit) as Array<
+    Record<string, unknown> & { id: number; effective_date: string }
+  >
   const hasMore = result.results.length > limit
 
   let responseNextToken: string | null = null
   if (hasMore && documents.length > 0) {
-    const lastDoc = documents[documents.length - 1] as {
-      id: number
-      effective_date: string
-    }
+    const lastDoc = documents[documents.length - 1]
     responseNextToken = btoa(JSON.stringify({ date: lastDoc.effective_date, id: lastDoc.id }))
   }
 
+  const docIds = documents.map((d) => d.id)
+  const statusByDocId = new Map<number, ReturnType<typeof computeProcessingStatus>>()
+  if (docIds.length > 0) {
+    const placeholders = docIds.map(() => '?').join(', ')
+    const runsResult = await c.env.DB.prepare(
+      `SELECT document_id, id, kind, status, started_at
+       FROM document_enrichment_run
+       WHERE document_id IN (${placeholders})`
+    )
+      .bind(...docIds)
+      .all<{ document_id: number; id: number; kind: string; status: string; started_at: string }>()
+
+    const runsByDoc = new Map<number, EnrichmentRunSummary[]>()
+    for (const r of runsResult.results) {
+      const list = runsByDoc.get(r.document_id) ?? []
+      list.push({ id: r.id, kind: r.kind, status: r.status, startedAt: r.started_at })
+      runsByDoc.set(r.document_id, list)
+    }
+    for (const id of docIds) {
+      statusByDocId.set(id, computeProcessingStatus(runsByDoc.get(id) ?? []))
+    }
+  }
+
+  const documentsWithStatus = documents.map((d) => ({
+    ...d,
+    processing_status: statusByDocId.get(d.id) ?? 'pending',
+  }))
+
   return c.json({
-    documents,
+    documents: documentsWithStatus,
     nextToken: responseNextToken,
   })
 })

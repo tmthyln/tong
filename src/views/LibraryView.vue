@@ -7,8 +7,9 @@ interface Document {
   original_doc_mimetype: string
   date_uploaded: string
   date_last_accessed: string | null
-  extracted_doc_char_count: number
-  extracted_doc_unique_char_count: number
+  extracted_doc_char_count: number | null
+  extracted_doc_unique_char_count: number | null
+  processing_status: 'pending' | 'processing' | 'ready'
 }
 
 interface TreeNode {
@@ -107,10 +108,23 @@ const uploadTargetFolderId = ref<number | null>(null)
 const headers = [
   { title: 'Filename', key: 'original_doc_filename', sortable: true },
   { title: 'Type', key: 'original_doc_mimetype', sortable: true },
+  { title: 'Status', key: 'processing_status', sortable: true },
   { title: 'Uploaded', key: 'date_uploaded', sortable: true },
   { title: 'Last Accessed', key: 'date_last_accessed', sortable: true },
   { title: 'Actions', key: 'actions', sortable: false },
 ]
+
+const statusChipColor: Record<Document['processing_status'], string> = {
+  pending: 'grey',
+  processing: 'blue',
+  ready: 'green',
+}
+
+const statusChipLabel: Record<Document['processing_status'], string> = {
+  pending: 'Pending',
+  processing: 'Processing',
+  ready: 'Ready',
+}
 
 function downloadDocument(doc: Document) {
   const link = document.createElement('a')
@@ -374,8 +388,9 @@ function moveTreeDocument() {
     original_doc_mimetype: '',
     date_uploaded: '',
     date_last_accessed: null,
-    extracted_doc_char_count: contextMenuTarget.value.charCount || 0,
-    extracted_doc_unique_char_count: 0,
+    extracted_doc_char_count: contextMenuTarget.value.charCount ?? null,
+    extracted_doc_unique_char_count: null,
+    processing_status: 'ready',
   }
   openMoveDialog(doc)
   contextMenu.value = false
@@ -458,8 +473,9 @@ function assignTreeDocumentScope() {
     original_doc_mimetype: '',
     date_uploaded: '',
     date_last_accessed: null,
-    extracted_doc_char_count: contextMenuTarget.value.charCount || 0,
-    extracted_doc_unique_char_count: 0,
+    extracted_doc_char_count: contextMenuTarget.value.charCount ?? null,
+    extracted_doc_unique_char_count: null,
+    processing_status: 'ready',
   }
   openAssignScopeDialog(doc)
   contextMenu.value = false
@@ -554,7 +570,9 @@ async function handleFileUpload(event: Event) {
                 </v-card-item>
                 <v-card-actions>
                   <v-chip size="small" variant="text">
-                    {{ doc.extracted_doc_char_count.toLocaleString() }} chars
+                    {{ doc.extracted_doc_char_count !== null
+                      ? `${doc.extracted_doc_char_count.toLocaleString()} chars`
+                      : 'Processing…' }}
                   </v-chip>
                 </v-card-actions>
               </v-card>
@@ -680,14 +698,19 @@ async function handleFileUpload(event: Event) {
           </router-link>
         </template>
         <template #item.extracted_doc_char_count="{ item }">
-          {{ item.extracted_doc_char_count.toLocaleString() }}
+          {{ item.extracted_doc_char_count !== null ? item.extracted_doc_char_count.toLocaleString() : '—' }}
         </template>
         <template #item.extracted_doc_unique_char_count="{ item }">
-          {{ item.extracted_doc_unique_char_count.toLocaleString() }}
+          {{ item.extracted_doc_unique_char_count !== null ? item.extracted_doc_unique_char_count.toLocaleString() : '—' }}
         </template>
         <template #item.original_doc_mimetype="{ item }">
           <v-chip size="small" variant="outlined">
             {{ item.original_doc_mimetype.split('/').pop() }}
+          </v-chip>
+        </template>
+        <template #item.processing_status="{ item }">
+          <v-chip :color="statusChipColor[item.processing_status]" size="small" variant="tonal">
+            {{ statusChipLabel[item.processing_status] }}
           </v-chip>
         </template>
         <template #item.date_uploaded="{ item }">
