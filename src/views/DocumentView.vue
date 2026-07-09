@@ -11,6 +11,7 @@ import { useSelectionToolbar } from '../composables/useSelectionToolbar'
 import { useTranslationAgent } from '../composables/useTranslationAgent'
 import InlineSuggestions from '../components/agent/InlineSuggestions.vue'
 import type { Entity, Chunk, Document, SimilarDoc } from '../types/document'
+import { isTranslationNotReady, type EnrichmentRunStatus } from '../composables/translationReadiness'
 
 type DocumentMode = 'reading' | 'translation' | 'reader'
 
@@ -301,6 +302,25 @@ const {
 const similarDocs = ref<SimilarDoc[] | null>(null)
 const similarLoading = ref(false)
 
+const enrichments = ref<EnrichmentRunStatus[] | null>(null)
+const translationNotReady = computed(
+  () => enrichments.value !== null && isTranslationNotReady(enrichments.value)
+)
+
+async function fetchEnrichments() {
+  const id = route.params.id
+  if (!id) return
+  try {
+    const response = await fetch(`/api/library/document/${id}/enrichments`)
+    if (response.ok) {
+      const data = await response.json()
+      enrichments.value = data.enrichments
+    }
+  } catch {
+    // non-critical — fail silently
+  }
+}
+
 // ── Document fetch ────────────────────────────────────────────────────────────
 
 async function fetchSimilarDocs() {
@@ -435,6 +455,7 @@ onMounted(() => {
 
   fetchDocument()
   fetchSimilarDocs()
+  fetchEnrichments()
 })
 
 onUnmounted(() => {
@@ -469,6 +490,15 @@ onUnmounted(() => {
           <v-btn value="reader"      icon="mdi-card-text-outline"  title="Reader" />
         </v-btn-toggle>
       </div>
+
+      <v-alert
+        v-if="documentMode === 'translation' && translationNotReady"
+        type="warning"
+        variant="tonal"
+        class="mb-4"
+      >
+        Initial translation drafts are still being generated for this document. Some chunks may not have a translation yet.
+      </v-alert>
 
       <div class="mb-4">
         <v-chip
