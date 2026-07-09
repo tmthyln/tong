@@ -1239,15 +1239,47 @@ libraryRoutes.post('/document', async (c) => {
   // A document uploaded into a folder inherits that folder's nearest-ancestor
   // knowledge-scope affinity (it has no scope of its own yet).
   const knowledgeScopeId = await resolveFolderAffinity(c.env.DB, folderId)
+  const dateUploaded = new Date().toISOString()
+
+  // Create the document row immediately (extraction fields are NULL until the
+  // workflow's first phase completes) so it shows up as "Pending" right away,
+  // and so a failed extraction still leaves a visible row.
+  const created = await c.env.DB.prepare(
+    `INSERT INTO document (
+      original_doc_location,
+      original_doc_filename,
+      original_doc_mimetype,
+      original_doc_content_hash,
+      date_uploaded,
+      parent_id,
+      knowledge_scope_id
+    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+    RETURNING id`
+  )
+    .bind(
+      fileInfo.location,
+      fileInfo.filename,
+      fileInfo.mimetype,
+      fileInfo.contentHash,
+      dateUploaded,
+      folderId,
+      knowledgeScopeId
+    )
+    .first<{ id: number }>()
+
+  if (!created) {
+    return c.json({ error: 'Failed to create document record' }, 500)
+  }
 
   // Kick off the ingestion workflow for new documents
   const instance = await c.env.INGEST_DOCUMENT_WORKFLOW.create({
     params: {
+      documentId: created.id,
       location: fileInfo.location,
       filename: fileInfo.filename,
       mimetype: fileInfo.mimetype,
       contentHash: fileInfo.contentHash,
-      dateUploaded: new Date().toISOString(),
+      dateUploaded,
       parentId: folderId,
       knowledgeScopeId,
     },
@@ -1257,6 +1289,7 @@ libraryRoutes.post('/document', async (c) => {
     {
       message: 'Document uploaded and processing started',
       workflowId: instance.id,
+      documentId: created.id,
       alreadyExists: false,
     },
     201

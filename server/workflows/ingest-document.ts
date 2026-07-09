@@ -37,9 +37,9 @@ const LLM_STEP_RETRIES = { retries: { limit: 4, delay: '5 second', backoff: 'exp
 
 /**
  * Run scope promotion for one document under a known knowledge scope. Writes
- * one scope_promotion enrichment run for the trigger document, and one
- * scope_promotion_retroactive run for each other document whose entities were
- * touched in the process.
+ * one entity_resolution enrichment run for the trigger document, and one
+ * entity_resolution_retroactive run for each other document whose entities
+ * were touched in the process.
  */
 async function runScopePromotion(
   env: Env,
@@ -98,6 +98,7 @@ async function runScopePromotion(
 }
 
 interface IngestDocumentParams {
+  documentId: number
   location: string
   filename: string
   mimetype: string
@@ -117,118 +118,124 @@ interface EntityTypeContext {
 export class IngestDocumentWorkflow extends WorkflowEntrypoint<Env, IngestDocumentParams> {
   async run(event: WorkflowEvent<IngestDocumentParams>, step: WorkflowStep) {
     const { payload } = event
+    const documentId = payload.documentId
 
-    // Phase 1: Extract content from document and save as markdown to R2 — 1 step
-    const extractResult = await step.do('extract-content', async () => {
-      const result = await extractContent(payload.location, payload.mimetype, this.env)
-      return { extractedLocation: result.extractedLocation, title: result.title }
-    })
-    const { extractedLocation, title } = extractResult
+    // Phase 1: document_stored — extract content, count characters, update the
+    // document record, generate chunk indices, and persist chunks — n + 5 steps
+    const storedRunId = await step.do('enrichment-start-document-stored', async () =>
+      startEnrichmentRun(this.env.DB, {
+        documentId,
+        kind: 'document_stored',
+        model: null,
+        params: {},
+        ontology: [],
+      })
+    )
 
-    // Phase 2: Count Chinese characters — 1 step
-    const charStats = await step.do('count-characters', async () => {
-      const content = await loadExtractedContent(extractedLocation, this.env)
-      return countChineseCharacters(content)
-    })
+    let chunkIds: number[]
+    try {
+      const extractResult = await step.do('extract-content', async () => {
+        const result = await extractContent(payload.location, payload.mimetype, this.env)
+        return { extractedLocation: result.extractedLocation, title: result.title }
+      })
+      const { extractedLocation, title } = extractResult
 
-    // Phase 3: Create the document record in the database — 1 step
-    const documentId = await step.do('create-document-record', async () => {
-      const result = await this.env.DB.prepare(
-        `INSERT INTO document (
-          title,
-          original_doc_location,
-          original_doc_filename,
-          original_doc_mimetype,
-          original_doc_content_hash,
-          date_uploaded,
-          extracted_doc_location,
-          extracted_doc_char_count,
-          extracted_doc_unique_char_count,
-          parent_id,
-          knowledge_scope_id
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        RETURNING id`
-      )
-        .bind(
-          title,
-          payload.location,
-          payload.filename,
-          payload.mimetype,
-          payload.contentHash,
-          payload.dateUploaded,
-          extractedLocation,
-          charStats.charCount,
-          charStats.uniqueCharCount,
-          payload.parentId,
-          payload.knowledgeScopeId
+      const charStats = await step.do('count-characters', async () => {
+        const content = await loadExtractedContent(extractedLocation, this.env)
+        return countChineseCharacters(content)
+      })
+
+      await step.do('update-document-record', async () => {
+        await this.env.DB.prepare(
+          `UPDATE document SET
+            title = ?,
+            extracted_doc_location = ?,
+            extracted_doc_char_count = ?,
+            extracted_doc_unique_char_count = ?
+          WHERE id = ?`
         )
-        .first<{ id: number }>()
+          .bind(title, extractedLocation, charStats.charCount, charStats.uniqueCharCount, documentId)
+          .run()
+      })
 
-      if (!result) {
-        throw new Error('Failed to create document record')
-      }
-      return result.id
-    })
+      const chunkIndices = await step.do('generate-chunk-indices', async () => {
+        const content = await loadExtractedContent(extractedLocation, this.env)
+        return generateChunkIndices(content)
+      })
 
-    // Phase 4: Generate text chunk indices — 1 step
-    const chunkIndices = await step.do('generate-chunk-indices', async () => {
-      const content = await loadExtractedContent(extractedLocation, this.env)
-      return generateChunkIndices(content)
-    })
+      chunkIds = await step.do('persist-text-chunks', async () => {
+        const content = await loadExtractedContent(extractedLocation, this.env)
 
-    // Phase 5: Persist each text chunk in database — n + 1 steps
-    const chunkIds = await step.do('persist-text-chunks', async () => {
-      const content = await loadExtractedContent(extractedLocation, this.env)
-
-      const settled = await Promise.allSettled(
-        chunkIndices.map((indices, order) =>
-          step.do(`persist-text-chunk-${order}`, async () => {
-            const chunkContent = content.slice(indices.startIndex, indices.endIndex)
-            const chunkCharStats = countChineseCharacters(chunkContent)
-            const result = await this.env.DB.prepare(
-              `INSERT INTO text_chunk (
-                source_document_id,
-                chunk_order,
-                extracted_doc_start_index,
-                extracted_doc_end_index,
-                content,
-                char_count,
-                unique_char_count
-              ) VALUES (?, ?, ?, ?, ?, ?, ?)
-              RETURNING id`
-            )
-              .bind(
-                documentId,
-                order,
-                indices.startIndex,
-                indices.endIndex,
-                chunkContent,
-                chunkCharStats.charCount,
-                chunkCharStats.uniqueCharCount
+        const settled = await Promise.allSettled(
+          chunkIndices.map((indices, order) =>
+            step.do(`persist-text-chunk-${order}`, async () => {
+              const chunkContent = content.slice(indices.startIndex, indices.endIndex)
+              const chunkCharStats = countChineseCharacters(chunkContent)
+              const result = await this.env.DB.prepare(
+                `INSERT INTO text_chunk (
+                  source_document_id,
+                  chunk_order,
+                  extracted_doc_start_index,
+                  extracted_doc_end_index,
+                  content,
+                  char_count,
+                  unique_char_count
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                RETURNING id`
               )
-              .first<{ id: number }>()
+                .bind(
+                  documentId,
+                  order,
+                  indices.startIndex,
+                  indices.endIndex,
+                  chunkContent,
+                  chunkCharStats.charCount,
+                  chunkCharStats.uniqueCharCount
+                )
+                .first<{ id: number }>()
 
-            if (!result) {
-              throw new Error('Failed to create text chunk record')
-            }
-            return result.id
-          })
+              if (!result) {
+                throw new Error('Failed to create text chunk record')
+              }
+              return result.id
+            })
+          )
         )
-      )
 
-      const ids: number[] = []
-      for (const r of settled) {
-        if (r.status === 'fulfilled') {
-          ids.push(r.value)
-        } else {
-          console.warn('[ingest] Failed to persist chunk:', r.reason)
+        const ids: number[] = []
+        for (const r of settled) {
+          if (r.status === 'fulfilled') {
+            ids.push(r.value)
+          } else {
+            console.warn('[ingest] Failed to persist chunk:', r.reason)
+          }
         }
-      }
-      return ids
-    })
+        return ids
+      })
 
-    // Phase 6: Embed each chunk — n steps
-    await Promise.allSettled(
+      await step.do('enrichment-complete-document-stored', async () => {
+        await completeEnrichmentRun(this.env.DB, storedRunId, { chunk_count: chunkIds.length })
+      })
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      await step.do('enrichment-fail-document-stored', async () => {
+        await failEnrichmentRun(this.env.DB, storedRunId, msg)
+      })
+      throw err
+    }
+
+    // Phase 2: chunk_embedding — embed each chunk — n + 2 steps
+    const embedRunId = await step.do('enrichment-start-chunk-embedding', async () =>
+      startEnrichmentRun(this.env.DB, {
+        documentId,
+        kind: 'chunk_embedding',
+        model: null,
+        params: { chunk_count: chunkIds.length },
+        ontology: [],
+      })
+    )
+
+    const embedResults = await Promise.allSettled(
       chunkIds.map((chunkId) =>
         step.do(`embed-chunk-${chunkId}`, async () => {
           const chunk = await this.env.DB.prepare(
@@ -245,7 +252,22 @@ export class IngestDocumentWorkflow extends WorkflowEntrypoint<Env, IngestDocume
       )
     )
 
-    // Phase 7: Load entity type definitions — 1 step
+    await step.do('enrichment-complete-chunk-embedding', async () => {
+      const failed = embedResults.filter((r) => r.status === 'rejected').length
+      if (failed > 0) {
+        await failEnrichmentRun(
+          this.env.DB,
+          embedRunId,
+          `${failed} of ${embedResults.length} chunk embeddings rejected`
+        )
+      } else {
+        await completeEnrichmentRun(this.env.DB, embedRunId, {
+          chunks_embedded: embedResults.length,
+        })
+      }
+    })
+
+    // Phase 3: Load entity type definitions — 1 step
     const entityTypeContext = await step.do(
       'load-entity-type-definitions',
       async (): Promise<EntityTypeContext> => {
@@ -302,140 +324,161 @@ export class IngestDocumentWorkflow extends WorkflowEntrypoint<Env, IngestDocume
       }
     )
 
+    // Phase 4/5: entity extraction + coreference resolution (skipped-but-tracked
+    // when no node types are configured; translation always runs regardless)
     if (entityTypeContext.nodeTypes.length === 0) {
       console.log('[ingest] No node types configured, skipping entity extraction')
-      return { documentId, chunkCount: chunkIds.length }
-    }
-
-    console.log(
-      `[ingest] Starting entity extraction — ${chunkIds.length} chunks, ${entityTypeContext.nodeTypes.length} node types, ${entityTypeContext.edgeTypes.length} edge types`
-    )
-
-    // Phase 8: Extract entities, deduplicate, and persist — n(k + 3) steps (k = node types)
-    const entityRunId = await step.do('enrichment-start-entity-extraction', async () =>
-      startEnrichmentRun(this.env.DB, {
-        documentId,
-        kind: 'entity_extraction',
-        model: ENTITY_EXTRACTION_MODEL,
-        params: {
-          temperature: 0,
-          max_completion_tokens: 1024,
-          response_format: 'json_object',
-          chunk_count: chunkIds.length,
-        },
-        ontology: entityTypeContext.nodeOntology,
-      })
-    )
-
-    const entityResults = await Promise.allSettled(
-      chunkIds.map(async (chunkId) => {
-        const chunkContent = await step.do(`load-chunk-content-${chunkId}`, async () => {
-          const chunk = await this.env.DB.prepare('SELECT content FROM text_chunk WHERE id = ?')
-            .bind(chunkId)
-            .first<{ content: string }>()
-          if (!chunk) throw new Error(`Chunk ${chunkId} not found`)
-          return chunk.content
+      await step.do('enrichment-skip-entity-extraction', async () => {
+        const runId = await startEnrichmentRun(this.env.DB, {
+          documentId,
+          kind: 'entity_extraction',
+          model: ENTITY_EXTRACTION_MODEL,
+          params: { chunk_count: chunkIds.length },
+          ontology: [],
         })
+        await completeEnrichmentRun(this.env.DB, runId, { skipped: 'no_node_types' })
+      })
+      await step.do('enrichment-skip-coreference-resolution', async () => {
+        const runId = await startEnrichmentRun(this.env.DB, {
+          documentId,
+          kind: 'coreference_resolution',
+          model: COREFERENCE_MODEL,
+          params: {},
+          ontology: [],
+        })
+        await completeEnrichmentRun(this.env.DB, runId, { skipped: 'no_node_types' })
+      })
+    } else {
+      console.log(
+        `[ingest] Starting entity extraction — ${chunkIds.length} chunks, ${entityTypeContext.nodeTypes.length} node types, ${entityTypeContext.edgeTypes.length} edge types`
+      )
 
-        // Entity extraction: one step per node type
-        const rawEntities: ExtractedEntity[] = []
-        for (const nodeType of entityTypeContext.nodeTypes) {
+      // Phase 4: Extract entities, deduplicate, and persist — n(k + 3) steps (k = node types)
+      const entityRunId = await step.do('enrichment-start-entity-extraction', async () =>
+        startEnrichmentRun(this.env.DB, {
+          documentId,
+          kind: 'entity_extraction',
+          model: ENTITY_EXTRACTION_MODEL,
+          params: {
+            temperature: 0,
+            max_completion_tokens: 1024,
+            response_format: 'json_object',
+            chunk_count: chunkIds.length,
+          },
+          ontology: entityTypeContext.nodeOntology,
+        })
+      )
+
+      const entityResults = await Promise.allSettled(
+        chunkIds.map(async (chunkId) => {
+          const chunkContent = await step.do(`load-chunk-content-${chunkId}`, async () => {
+            const chunk = await this.env.DB.prepare('SELECT content FROM text_chunk WHERE id = ?')
+              .bind(chunkId)
+              .first<{ content: string }>()
+            if (!chunk) throw new Error(`Chunk ${chunkId} not found`)
+            return chunk.content
+          })
+
+          // Entity extraction: one step per node type
+          const rawEntities: ExtractedEntity[] = []
+          for (const nodeType of entityTypeContext.nodeTypes) {
+            const entities = await step.do(
+              `extract-entities-${chunkId}-${nodeType.name}`,
+              LLM_STEP_RETRIES,
+              async (): Promise<ExtractedEntity[]> =>
+                extractEntitiesForNodeTypes(chunkContent, [nodeType], this.env)
+            )
+            rawEntities.push(...entities)
+          }
+
+          // LLM entity deduplication
           const entities = await step.do(
-            `extract-entities-${chunkId}-${nodeType.name}`,
-            LLM_STEP_RETRIES,
+            `deduplicate-entities-${chunkId}`,
             async (): Promise<ExtractedEntity[]> =>
-              extractEntitiesForNodeTypes(chunkContent, [nodeType], this.env)
+              deduplicateEntitiesLLM(chunkContent, rawEntities, this.env)
           )
-          rawEntities.push(...entities)
-        }
+          // Persist entities for this chunk
+          await step.do(`persist-entities-${chunkId}`, async () => {
+            console.log(
+              `[ingest] Chunk ${chunkId}: ${entities.length} entities (${rawEntities.length} raw)`
+            )
+            if (entities.length === 0) return
 
-        // LLM entity deduplication
-        const entities = await step.do(
-          `deduplicate-entities-${chunkId}`,
-          async (): Promise<ExtractedEntity[]> =>
-            deduplicateEntitiesLLM(chunkContent, rawEntities, this.env)
-        )
-        // Persist entities for this chunk
-        await step.do(`persist-entities-${chunkId}`, async () => {
-          console.log(
-            `[ingest] Chunk ${chunkId}: ${entities.length} entities (${rawEntities.length} raw)`
-          )
-          if (entities.length === 0) return
-
-          const entityStmt = this.env.DB.prepare(
-            `INSERT OR IGNORE INTO extracted_entity
-              (source_document_id, source_chunk_id, entity_type, extracted_text,
-               chunk_start_index, chunk_end_index, scope)
-             VALUES (?, ?, ?, ?, ?, ?, ?)`
-          )
-          await this.env.DB.batch(
-            entities.map((entity) =>
-              entityStmt.bind(
-                documentId,
-                chunkId,
-                entity.nodeType,
-                entity.text,
-                entity.startIndex,
-                entity.endIndex,
-                'chunk'
+            const entityStmt = this.env.DB.prepare(
+              `INSERT OR IGNORE INTO extracted_entity
+                (source_document_id, source_chunk_id, entity_type, extracted_text,
+                 chunk_start_index, chunk_end_index, scope)
+               VALUES (?, ?, ?, ?, ?, ?, ?)`
+            )
+            await this.env.DB.batch(
+              entities.map((entity) =>
+                entityStmt.bind(
+                  documentId,
+                  chunkId,
+                  entity.nodeType,
+                  entity.text,
+                  entity.startIndex,
+                  entity.endIndex,
+                  'chunk'
+                )
               )
             )
-          )
+          })
         })
-      })
-    )
-
-    // Close Phase 8 enrichment run
-    await step.do('enrichment-complete-entity-extraction', async () => {
-      const failed = entityResults.filter((r) => r.status === 'rejected').length
-      const totalEntitiesRow = await this.env.DB.prepare(
-        `SELECT COUNT(*) AS n FROM extracted_entity WHERE source_document_id = ? AND scope = 'chunk'`
       )
-        .bind(documentId)
-        .first<{ n: number }>()
-      if (failed > 0) {
-        await failEnrichmentRun(
-          this.env.DB,
-          entityRunId,
-          `${failed} of ${entityResults.length} per-chunk extractions rejected`
-        )
-      } else {
-        await completeEnrichmentRun(this.env.DB, entityRunId, {
-          chunks_processed: entityResults.length,
-          chunks_failed: failed,
-          entities_inserted: totalEntitiesRow?.n ?? 0,
-          node_types: entityTypeContext.nodeTypes.length,
-        })
-      }
-    })
 
-    // Phase 9: Document-wide coreference resolution — 1 step
-    await step.do('coref-resolution', LLM_STEP_RETRIES, async () => {
-      const corefRunId = await startEnrichmentRun(this.env.DB, {
-        documentId,
-        kind: 'coreference_resolution',
-        model: COREFERENCE_MODEL,
-        params: { temperature: 0, max_tokens: 1024, response_format: 'json_object' },
-        ontology: entityTypeContext.nodeOntology,
-      })
-      try {
-        await resolveDocumentCoreference(documentId, this.env)
-        const docEntitiesRow = await this.env.DB.prepare(
-          `SELECT COUNT(*) AS n FROM extracted_entity WHERE source_document_id = ? AND scope = 'document'`
+      // Close Phase 4 enrichment run
+      await step.do('enrichment-complete-entity-extraction', async () => {
+        const failed = entityResults.filter((r) => r.status === 'rejected').length
+        const totalEntitiesRow = await this.env.DB.prepare(
+          `SELECT COUNT(*) AS n FROM extracted_entity WHERE source_document_id = ? AND scope = 'chunk'`
         )
           .bind(documentId)
           .first<{ n: number }>()
-        await completeEnrichmentRun(this.env.DB, corefRunId, {
-          document_entities_created: docEntitiesRow?.n ?? 0,
-        })
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err)
-        await failEnrichmentRun(this.env.DB, corefRunId, msg)
-        throw err
-      }
-    })
+        if (failed > 0) {
+          await failEnrichmentRun(
+            this.env.DB,
+            entityRunId,
+            `${failed} of ${entityResults.length} per-chunk extractions rejected`
+          )
+        } else {
+          await completeEnrichmentRun(this.env.DB, entityRunId, {
+            chunks_processed: entityResults.length,
+            chunks_failed: failed,
+            entities_inserted: totalEntitiesRow?.n ?? 0,
+            node_types: entityTypeContext.nodeTypes.length,
+          })
+        }
+      })
 
-    // Phase 10: Sliding window relationship extraction — ⌈n/2⌉ · e + 1 steps (e = edge types)
+      // Phase 5: Document-wide coreference resolution — 1 step
+      await step.do('coref-resolution', LLM_STEP_RETRIES, async () => {
+        const corefRunId = await startEnrichmentRun(this.env.DB, {
+          documentId,
+          kind: 'coreference_resolution',
+          model: COREFERENCE_MODEL,
+          params: { temperature: 0, max_tokens: 1024, response_format: 'json_object' },
+          ontology: entityTypeContext.nodeOntology,
+        })
+        try {
+          await resolveDocumentCoreference(documentId, this.env)
+          const docEntitiesRow = await this.env.DB.prepare(
+            `SELECT COUNT(*) AS n FROM extracted_entity WHERE source_document_id = ? AND scope = 'document'`
+          )
+            .bind(documentId)
+            .first<{ n: number }>()
+          await completeEnrichmentRun(this.env.DB, corefRunId, {
+            document_entities_created: docEntitiesRow?.n ?? 0,
+          })
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err)
+          await failEnrichmentRun(this.env.DB, corefRunId, msg)
+          throw err
+        }
+      })
+    }
+
+    // Phase 6: Sliding window relationship extraction — ⌈n/2⌉ · e + 1 steps (e = edge types)
     if (entityTypeContext.edgeTypes.length > 0) {
       const relRunId = await step.do('enrichment-start-relationship-extraction', async () =>
         startEnrichmentRun(this.env.DB, {
@@ -464,7 +507,7 @@ export class IngestDocumentWorkflow extends WorkflowEntrypoint<Env, IngestDocume
       }
 
       const windowCount = centerIndices.length * entityTypeContext.edgeTypes.length
-      console.log(`[ingest] Document ${documentId}: starting Phase 10 — ${windowCount} window/edge-type steps`)
+      console.log(`[ingest] Document ${documentId}: starting Phase 6 — ${windowCount} window/edge-type steps`)
 
       const windowResults = await Promise.allSettled(
         centerIndices.flatMap((centerIdx) =>
@@ -716,15 +759,38 @@ export class IngestDocumentWorkflow extends WorkflowEntrypoint<Env, IngestDocume
           edge_types: entityTypeContext.edgeTypes.length,
         })
       })
+    } else {
+      await step.do('enrichment-skip-relationship-extraction', async () => {
+        const runId = await startEnrichmentRun(this.env.DB, {
+          documentId,
+          kind: 'relationship_extraction',
+          model: RELATIONSHIP_EXTRACTION_MODEL,
+          params: {},
+          ontology: [],
+        })
+        await completeEnrichmentRun(this.env.DB, runId, { skipped: 'no_edge_types' })
+      })
     }
 
-    // Phase 11: Knowledge-scope promotion — runs only when the document is assigned a scope.
+    // Phase 7: Knowledge-scope promotion (entity_resolution) — runs only when
+    // the document is assigned a scope. Not part of the preprocessing Ready gate.
     if (payload.knowledgeScopeId !== null) {
       await runScopePromotion(this.env, documentId, payload.knowledgeScopeId, entityTypeContext, step)
     }
 
-    // Phase 12: MT baseline translation (draft_number = -1) — n steps
-    await Promise.allSettled(
+    // Phase 8: initial_translation — MT baseline (draft -1), LLM+MT context
+    // baseline (draft 0), and initial draft — 3n + 2 steps
+    const initialTranslationRunId = await step.do('enrichment-start-initial-translation', async () =>
+      startEnrichmentRun(this.env.DB, {
+        documentId,
+        kind: 'initial_translation',
+        model: null,
+        params: { chunk_count: chunkIds.length },
+        ontology: [],
+      })
+    )
+
+    const mtBaselineResults = await Promise.allSettled(
       chunkIds.map((chunkId) =>
         step.do(`translate-chunk-mt-baseline-${chunkId}`, LLM_STEP_RETRIES, async () => {
           const chunk = await this.env.DB.prepare('SELECT content FROM text_chunk WHERE id = ?')
@@ -735,10 +801,9 @@ export class IngestDocumentWorkflow extends WorkflowEntrypoint<Env, IngestDocume
         })
       )
     )
-    console.log(`[ingest] Document ${documentId}: Phase 12 complete — ${chunkIds.length} chunks MT baseline translated`)
+    console.log(`[ingest] Document ${documentId}: MT baseline translation complete — ${chunkIds.length} chunks`)
 
-    // Phase 12: LLM+MT context baseline translation (draft_number = 0) — n steps
-    await Promise.allSettled(
+    const llmMtBaselineResults = await Promise.allSettled(
       chunkIds.map((chunkId) =>
         step.do(`translate-chunk-llm-mt-baseline-${chunkId}`, LLM_STEP_RETRIES, async () => {
           const chunk = await this.env.DB.prepare('SELECT content FROM text_chunk WHERE id = ?')
@@ -749,10 +814,9 @@ export class IngestDocumentWorkflow extends WorkflowEntrypoint<Env, IngestDocume
         })
       )
     )
-    console.log(`[ingest] Document ${documentId}: Phase 13 complete — ${chunkIds.length} chunks LLM+MT baseline translated`)
+    console.log(`[ingest] Document ${documentId}: LLM+MT baseline translation complete — ${chunkIds.length} chunks`)
 
-    // Phase 13: Initial translation draft — n steps
-    await Promise.allSettled(
+    const initialDraftResults = await Promise.allSettled(
       chunkIds.map((chunkId) =>
         step.do(`translate-chunk-initial-${chunkId}`, LLM_STEP_RETRIES, async () => {
           const chunk = await this.env.DB.prepare('SELECT content FROM text_chunk WHERE id = ?')
@@ -763,10 +827,37 @@ export class IngestDocumentWorkflow extends WorkflowEntrypoint<Env, IngestDocume
         })
       )
     )
-    console.log(`[ingest] Document ${documentId}: Phase 14 complete — ${chunkIds.length} chunks translated (initial draft)`)
+    console.log(`[ingest] Document ${documentId}: initial draft translation complete — ${chunkIds.length} chunks`)
 
-    // Phase 14: Revised translation draft — n steps
-    await Promise.allSettled(
+    await step.do('enrichment-complete-initial-translation', async () => {
+      const failed = [...mtBaselineResults, ...llmMtBaselineResults, ...initialDraftResults].filter(
+        (r) => r.status === 'rejected'
+      ).length
+      if (failed > 0) {
+        await failEnrichmentRun(
+          this.env.DB,
+          initialTranslationRunId,
+          `${failed} chunk translation steps rejected across MT baseline / LLM+MT baseline / initial draft`
+        )
+      } else {
+        await completeEnrichmentRun(this.env.DB, initialTranslationRunId, {
+          chunks_translated: chunkIds.length,
+        })
+      }
+    })
+
+    // Phase 9: initial_translation_refinement — revision draft — n + 2 steps
+    const refinementRunId = await step.do('enrichment-start-initial-translation-refinement', async () =>
+      startEnrichmentRun(this.env.DB, {
+        documentId,
+        kind: 'initial_translation_refinement',
+        model: null,
+        params: { chunk_count: chunkIds.length },
+        ontology: [],
+      })
+    )
+
+    const revisionResults = await Promise.allSettled(
       chunkIds.map((chunkId) =>
         step.do(`translate-chunk-revision-${chunkId}`, LLM_STEP_RETRIES, async () => {
           const chunk = await this.env.DB.prepare('SELECT content FROM text_chunk WHERE id = ?')
@@ -777,7 +868,22 @@ export class IngestDocumentWorkflow extends WorkflowEntrypoint<Env, IngestDocume
         })
       )
     )
-    console.log(`[ingest] Document ${documentId}: Phase 15 complete — ${chunkIds.length} chunks translated (revision)`)
+    console.log(`[ingest] Document ${documentId}: revision translation complete — ${chunkIds.length} chunks`)
+
+    await step.do('enrichment-complete-initial-translation-refinement', async () => {
+      const failed = revisionResults.filter((r) => r.status === 'rejected').length
+      if (failed > 0) {
+        await failEnrichmentRun(
+          this.env.DB,
+          refinementRunId,
+          `${failed} of ${revisionResults.length} revision steps rejected`
+        )
+      } else {
+        await completeEnrichmentRun(this.env.DB, refinementRunId, {
+          chunks_revised: revisionResults.length,
+        })
+      }
+    })
 
     return { documentId, chunkCount: chunkIds.length }
   }
