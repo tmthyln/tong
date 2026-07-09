@@ -152,6 +152,121 @@ export async function enrichAfterEntityChange(
 ): Promise<void> {
   await resolveDocumentCoreference(documentId, env)
   await extractAndPersistChunkRelationships(chunkId, documentId, env)
+  // resolveDocumentCoreference() deletes and recreates the document's
+  // document-scope entities; the FK (extracted_relationship → extracted_entity,
+  // ON DELETE CASCADE) means that also wipes every document-scope relationship.
+  // Chunk-scope relationships survive, so re-derive the document-scope layer
+  // from them — otherwise the graph outside the changed chunk's window is lost.
+  await rebuildDocumentScopeRelationships(documentId, env)
+}
+
+/**
+ * Rebuild a document's document-scope relationships from its surviving
+ * chunk-scope relationships. Each chunk-relationship endpoint is mapped to its
+ * coreference parent (document-scope) entity; endpoints whose chunk entity has
+ * no parent are promoted to a single-member document-scope entity, matching
+ * the ingest workflow's Phase 6 semantics. Idempotent: existing document-scope
+ * relationships for the document are cleared before rebuilding.
+ */
+export async function rebuildDocumentScopeRelationships(
+  documentId: number,
+  env: Env,
+): Promise<void> {
+  // Clear any lingering document-scope relationships (usually already empty:
+  // the coreference delete cascaded them away). Keeps repeated runs consistent.
+  await env.DB
+    .prepare(`DELETE FROM extracted_relationship WHERE source_document_id = ? AND scope = 'document'`)
+    .bind(documentId)
+    .run()
+
+  const chunkRels = await env.DB
+    .prepare(
+      `SELECT from_entity_id, to_entity_id, edge_type, explanation
+       FROM extracted_relationship
+       WHERE source_document_id = ? AND scope = 'chunk'`,
+    )
+    .bind(documentId)
+    .all<{ from_entity_id: number; to_entity_id: number; edge_type: string; explanation: string | null }>()
+
+  if (chunkRels.results.length === 0) return
+
+  // Load every chunk entity so endpoints can be mapped to a document-scope parent.
+  const entityRows = await env.DB
+    .prepare(
+      `SELECT id, parent_id, entity_type, extracted_text
+       FROM extracted_entity
+       WHERE source_document_id = ? AND scope = 'chunk'`,
+    )
+    .bind(documentId)
+    .all<{ id: number; parent_id: number | null; entity_type: string; extracted_text: string | null }>()
+
+  const entityInfo = new Map<
+    number,
+    { parentId: number | null; entityType: string; extractedText: string | null }
+  >()
+  for (const r of entityRows.results) {
+    entityInfo.set(r.id, {
+      parentId: r.parent_id,
+      entityType: r.entity_type,
+      extractedText: r.extracted_text,
+    })
+  }
+
+  // Resolve a chunk entity to its document-scope parent, promoting singletons
+  // (chunk entities coreference left unparented) on demand.
+  const promoted = new Map<number, number>()
+  const resolveDocEntityId = async (chunkEntityId: number): Promise<number | null> => {
+    const info = entityInfo.get(chunkEntityId)
+    if (!info) return null
+    if (info.parentId !== null) return info.parentId
+
+    const cached = promoted.get(chunkEntityId)
+    if (cached !== undefined) return cached
+
+    const inserted = await env.DB
+      .prepare(
+        `INSERT INTO extracted_entity
+          (source_document_id, source_chunk_id, entity_type, extracted_text, label, scope)
+         VALUES (?, NULL, ?, NULL, ?, 'document')
+         RETURNING id`,
+      )
+      .bind(documentId, info.entityType, info.extractedText)
+      .first<{ id: number }>()
+    if (!inserted) return null
+
+    await env.DB
+      .prepare('UPDATE extracted_entity SET parent_id = ? WHERE id = ?')
+      .bind(inserted.id, chunkEntityId)
+      .run()
+
+    promoted.set(chunkEntityId, inserted.id)
+    info.parentId = inserted.id
+    return inserted.id
+  }
+
+  const docRels: Array<{ fromId: number; toId: number; edgeType: string; explanation: string | null }> = []
+  const seen = new Set<string>()
+  for (const rel of chunkRels.results) {
+    const fromId = await resolveDocEntityId(rel.from_entity_id)
+    const toId = await resolveDocEntityId(rel.to_entity_id)
+    if (fromId === null || toId === null || fromId === toId) continue
+
+    const key = `${fromId}|${toId}|${rel.edge_type}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    docRels.push({ fromId, toId, edgeType: rel.edge_type, explanation: rel.explanation })
+  }
+
+  if (docRels.length > 0) {
+    const stmt = env.DB.prepare(
+      `INSERT INTO extracted_relationship
+        (source_document_id, from_entity_id, to_entity_id, edge_type, explanation, scope)
+       VALUES (?, ?, ?, ?, ?, 'document')`,
+    )
+    await env.DB.batch(
+      docRels.map((r) => stmt.bind(documentId, r.fromId, r.toId, r.edgeType, r.explanation)),
+    )
+  }
 }
 
 async function extractAndPersistChunkRelationships(
