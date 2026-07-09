@@ -1,9 +1,13 @@
 export type EnrichmentKind =
+  | 'document_stored'
+  | 'chunk_embedding'
   | 'entity_extraction'
+  | 'coreference_resolution'
   | 'relationship_extraction'
-  | 'document_coreference'
-  | 'scope_promotion'
-  | 'scope_promotion_retroactive'
+  | 'entity_resolution'
+  | 'entity_resolution_retroactive'
+  | 'initial_translation'
+  | 'initial_translation_refinement'
 
 export interface OntologyRef {
   kind: 'node' | 'edge'
@@ -94,4 +98,55 @@ export async function withEnrichmentRun<T>(
     await failEnrichmentRun(db, runId, msg)
     throw err
   }
+}
+
+export type ProcessingStatus = 'pending' | 'processing' | 'ready'
+
+export interface EnrichmentRunSummary {
+  id: number
+  kind: string
+  status: string
+  startedAt: string
+}
+
+/**
+ * Preprocessing enrichments that gate a document's "ready" status in the
+ * library table. Excludes entity_resolution, which only runs once a
+ * document is assigned a knowledge scope.
+ */
+export const PREPROCESSING_KINDS: EnrichmentKind[] = [
+  'document_stored',
+  'chunk_embedding',
+  'entity_extraction',
+  'coreference_resolution',
+  'relationship_extraction',
+  'initial_translation',
+  'initial_translation_refinement',
+]
+
+/**
+ * Derive a document's 3-state processing status from its enrichment runs.
+ * Only the latest run per kind counts, where "latest" means highest
+ * startedAt, then highest id as a tiebreaker.
+ */
+export function computeProcessingStatus(runs: EnrichmentRunSummary[]): ProcessingStatus {
+  const latestByKind = new Map<string, EnrichmentRunSummary>()
+  for (const run of runs) {
+    const existing = latestByKind.get(run.kind)
+    if (
+      !existing ||
+      run.startedAt > existing.startedAt ||
+      (run.startedAt === existing.startedAt && run.id > existing.id)
+    ) {
+      latestByKind.set(run.kind, run)
+    }
+  }
+
+  const stored = latestByKind.get('document_stored')
+  if (!stored || stored.status !== 'completed') return 'pending'
+
+  const allDone = PREPROCESSING_KINDS.every(
+    (kind) => latestByKind.get(kind)?.status === 'completed'
+  )
+  return allDone ? 'ready' : 'processing'
 }

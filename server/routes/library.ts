@@ -1161,7 +1161,7 @@ async function runScopePromotionAsync(
   const ontology = await loadOntologyForRun(env.DB)
   const runId = await startEnrichmentRun(env.DB, {
     documentId: triggerDocumentId,
-    kind: 'scope_promotion',
+    kind: 'entity_resolution',
     model: SCOPE_PROMOTION_MODEL,
     params: { knowledge_scope_id: knowledgeScopeId, trigger: 'late_assignment' },
     ontology,
@@ -1181,7 +1181,7 @@ async function runScopePromotionAsync(
       const retroRelResult = await promoteDocumentRelationshipsToScope(m, knowledgeScopeId, env)
       const retroId = await startEnrichmentRun(env.DB, {
         documentId: m,
-        kind: 'scope_promotion_retroactive',
+        kind: 'entity_resolution_retroactive',
         model: SCOPE_PROMOTION_MODEL,
         params: {
           knowledge_scope_id: knowledgeScopeId,

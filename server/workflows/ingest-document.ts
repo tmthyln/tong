@@ -53,7 +53,7 @@ async function runScopePromotion(
   await step.do('scope-promote-trigger', LLM_STEP_RETRIES, async () => {
     const runId = await startEnrichmentRun(env.DB, {
       documentId: triggerDocumentId,
-      kind: 'scope_promotion',
+      kind: 'entity_resolution',
       model: SCOPE_PROMOTION_MODEL,
       params: { knowledge_scope_id: knowledgeScopeId },
       ontology,
@@ -74,7 +74,7 @@ async function runScopePromotion(
         const retroRelResult = await promoteDocumentRelationshipsToScope(m, knowledgeScopeId, env)
         const retroId = await startEnrichmentRun(env.DB, {
           documentId: m,
-          kind: 'scope_promotion_retroactive',
+          kind: 'entity_resolution_retroactive',
           model: SCOPE_PROMOTION_MODEL,
           params: { knowledge_scope_id: knowledgeScopeId, triggered_by_document_id: triggerDocumentId },
           ontology,
@@ -413,7 +413,7 @@ export class IngestDocumentWorkflow extends WorkflowEntrypoint<Env, IngestDocume
     await step.do('coref-resolution', LLM_STEP_RETRIES, async () => {
       const corefRunId = await startEnrichmentRun(this.env.DB, {
         documentId,
-        kind: 'document_coreference',
+        kind: 'coreference_resolution',
         model: COREFERENCE_MODEL,
         params: { temperature: 0, max_tokens: 1024, response_format: 'json_object' },
         ontology: entityTypeContext.nodeOntology,

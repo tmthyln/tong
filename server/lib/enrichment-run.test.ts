@@ -4,6 +4,8 @@ import {
   completeEnrichmentRun,
   failEnrichmentRun,
   withEnrichmentRun,
+  computeProcessingStatus,
+  type EnrichmentRunSummary,
 } from './enrichment-run'
 
 interface FakeStatement {
@@ -115,7 +117,7 @@ describe('withEnrichmentRun', () => {
       db,
       {
         documentId: 1,
-        kind: 'document_coreference',
+        kind: 'coreference_resolution',
         model: '@cf/x',
         params: {},
         ontology: [],
@@ -144,7 +146,7 @@ describe('withEnrichmentRun', () => {
         db,
         {
           documentId: 1,
-          kind: 'document_coreference',
+          kind: 'coreference_resolution',
           model: null,
           params: {},
           ontology: [],
@@ -158,5 +160,71 @@ describe('withEnrichmentRun', () => {
     const fail = calls.find((c) => c.sql.includes("SET status = 'failed'"))
     expect(fail).toBeDefined()
     expect(fail!.args[0]).toBe('LLM down')
+  })
+})
+
+describe('computeProcessingStatus', () => {
+  const run = (
+    kind: string,
+    status: string,
+    id: number,
+    startedAt = '2026-01-01T00:00:00.000Z'
+  ): EnrichmentRunSummary => ({ id, kind, status, startedAt })
+
+  const allPreprocessingCompleted = (): EnrichmentRunSummary[] => [
+    run('document_stored', 'completed', 1),
+    run('chunk_embedding', 'completed', 2),
+    run('entity_extraction', 'completed', 3),
+    run('coreference_resolution', 'completed', 4),
+    run('relationship_extraction', 'completed', 5),
+    run('initial_translation', 'completed', 6),
+    run('initial_translation_refinement', 'completed', 7),
+  ]
+
+  it('returns pending when there are no runs at all', () => {
+    expect(computeProcessingStatus([])).toBe('pending')
+  })
+
+  it('returns pending when document_stored has not completed', () => {
+    const runs = [run('document_stored', 'in_progress', 1)]
+    expect(computeProcessingStatus(runs)).toBe('pending')
+  })
+
+  it('returns processing when document_stored is done but other preprocessing kinds are missing', () => {
+    const runs = [run('document_stored', 'completed', 1)]
+    expect(computeProcessingStatus(runs)).toBe('processing')
+  })
+
+  it('returns ready when every preprocessing kind has completed', () => {
+    expect(computeProcessingStatus(allPreprocessingCompleted())).toBe('ready')
+  })
+
+  it('returns processing when a preprocessing kind failed', () => {
+    const runs = allPreprocessingCompleted()
+    runs[6] = run('initial_translation_refinement', 'failed', 7)
+    expect(computeProcessingStatus(runs)).toBe('processing')
+  })
+
+  it('ignores entity_resolution when deciding ready', () => {
+    const runs = [...allPreprocessingCompleted(), run('entity_resolution', 'failed', 8)]
+    expect(computeProcessingStatus(runs)).toBe('ready')
+  })
+
+  it('uses only the latest run per kind, by startedAt', () => {
+    const runs = [
+      ...allPreprocessingCompleted(),
+      run('initial_translation', 'failed', 99, '2026-01-02T00:00:00.000Z'),
+    ]
+    // The failed run is newer (later startedAt), so it wins over the completed one.
+    expect(computeProcessingStatus(runs)).toBe('processing')
+  })
+
+  it('breaks startedAt ties using the higher id', () => {
+    const runs = [
+      ...allPreprocessingCompleted(),
+      run('initial_translation', 'failed', 100),
+    ]
+    // Same startedAt as the original id-6 completed run; id 100 > 6 so it wins.
+    expect(computeProcessingStatus(runs)).toBe('processing')
   })
 })

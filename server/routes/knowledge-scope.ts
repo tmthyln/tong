@@ -194,7 +194,7 @@ knowledgeScopeRoutes.post('/:id/run-promotion', async (c) => {
   for (const d of docs.results) {
     const runId = await startEnrichmentRun(c.env.DB, {
       documentId: d.id,
-      kind: 'scope_promotion',
+      kind: 'entity_resolution',
       model: SCOPE_PROMOTION_MODEL,
       params: { knowledge_scope_id: id, trigger: 'manual_rerun' },
       ontology,
@@ -216,7 +216,7 @@ knowledgeScopeRoutes.post('/:id/run-promotion', async (c) => {
         scopeRelationshipsPromoted += retroRelResult.relationshipsPromoted
         const retroId = await startEnrichmentRun(c.env.DB, {
           documentId: m,
-          kind: 'scope_promotion_retroactive',
+          kind: 'entity_resolution_retroactive',
           model: SCOPE_PROMOTION_MODEL,
           params: {
             knowledge_scope_id: id,
