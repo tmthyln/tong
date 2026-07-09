@@ -11,7 +11,9 @@
 		"type-check": "vue-tsc --build",
 		"deploy": "npm run build && wrangler deploy",
 		"cf-typegen": "wrangler types",
-		"test": "vitest --config vitest.config.ts"
+		"test": "vitest --config vitest.config.ts",
+		"test:e2e": "playwright test",
+		"test:e2e:ui": "playwright test --ui"
 	},
 	"dependencies": {
 		"@cloudflare/ai-chat": "^0.8.5",
@@ -33,6 +35,7 @@
 	},
 	"devDependencies": {
 		"@cloudflare/vite-plugin": "^1.43.1",
+		"@playwright/test": "^1.61.1",
 		"@tsconfig/node24": "^24.0.4",
 		"@types/d3": "^7.4.3",
 		"@types/diff": "^7.0.2",

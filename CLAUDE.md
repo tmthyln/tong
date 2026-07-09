@@ -9,11 +9,12 @@ Tong is a single-user web-based Chinese (Mandarin) language learning system. Use
 ## Commands
 
 ```bash
-npm run dev       # Vite dev server (frontend only, no Worker)
-npm run preview   # Full-stack preview with Wrangler
+npm run dev       # Vite dev server — full stack (@cloudflare/vite-plugin runs the Worker with local D1/DO; AI/Vectorize hit remote bindings)
+npm run preview   # Full-stack preview with Wrangler (build + wrangler dev)
 npm run build     # Production build with type-check
 npm run deploy    # Build and deploy to Cloudflare
 npm run cf-typegen # Generate Cloudflare Worker types
+npm run test:e2e  # Playwright e2e tests (e2e/*.spec.ts; boots npm run dev on port 5199)
 ```
 
 ## Architecture
