@@ -2,21 +2,35 @@
 const TEXT_MIMETYPES = ['text/plain', 'text/markdown'] as const
 type TextMimetype = (typeof TEXT_MIMETYPES)[number]
 
-// Mimetypes supported by Cloudflare AI markdown conversion
+// Mimetypes supported by Cloudflare AI markdown conversion (env.AI.toMarkdown).
+// Mirrors the "Rich format file types" list at
+// https://developers.cloudflare.com/workers-ai/features/markdown-conversion/
 const AI_CONVERTIBLE_MIMETYPES = [
   'application/pdf',
+  // HTML / XML
   'text/html',
   'text/xml',
   'application/xml',
+  // Tabular / plain
   'text/csv',
+  // Microsoft Office
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document', // docx
   'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', // xlsx
+  'application/vnd.ms-excel.sheet.macroenabled.12', // xlsm
+  'application/vnd.ms-excel.sheet.binary.macroenabled.12', // xlsb
   'application/vnd.ms-excel', // xls
+  // OpenDocument
   'application/vnd.oasis.opendocument.spreadsheet', // ods
   'application/vnd.oasis.opendocument.text', // odt
+  // Apple iWork
+  'application/vnd.apple.numbers', // numbers
+  // Images
   'image/jpeg',
   'image/png',
   'image/webp',
   'image/svg+xml',
+  'image/gif',
+  'image/bmp',
 ] as const
 type AiConvertibleMimetype = (typeof AI_CONVERTIBLE_MIMETYPES)[number]
 
@@ -99,6 +113,11 @@ export async function extractContent(
   mimetype: string,
   env: Env
 ): Promise<ExtractedContent> {
+  // Reject unsupported mimetypes before fetching the file
+  if (!isTextMimetype(mimetype) && !isAiConvertibleMimetype(mimetype)) {
+    throw new Error(`Unsupported mimetype: ${mimetype}`)
+  }
+
   // Fetch original file from R2
   const object = await env.DOCUMENTS.get(location)
   if (!object) {
