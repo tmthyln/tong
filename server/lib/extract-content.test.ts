@@ -32,8 +32,9 @@ describe('extractContent', () => {
   })
 
   describe('text/markdown content', () => {
-    it('returns markdown content unchanged', async () => {
-      const markdownContent = '# Hello World\n\nThis is **markdown**.'
+    it('returns markdown content unchanged when there is no lone title heading', async () => {
+      // Content without a single top-level H1 passes through untouched
+      const markdownContent = 'Intro paragraph.\n\n## Hello World\n\nThis is **markdown**.'
       const mockR2 = mockEnv.DOCUMENTS as unknown as {
         get: ReturnType<typeof vi.fn>
         put: ReturnType<typeof vi.fn>
@@ -47,6 +48,25 @@ describe('extractContent', () => {
       )
 
       expect(result.content).toBe(markdownContent)
+      expect(result.title).toBeNull()
+    })
+
+    it('extracts a lone H1 as the title and strips it from the content', async () => {
+      const markdownContent = '# Hello World\n\nThis is **markdown**.'
+      const mockR2 = mockEnv.DOCUMENTS as unknown as {
+        get: ReturnType<typeof vi.fn>
+        put: ReturnType<typeof vi.fn>
+      }
+      mockR2.get.mockResolvedValue(createMockR2Object(markdownContent))
+
+      const result = await extractContent(
+        'originals/ab/cd/abcd1234',
+        'text/markdown',
+        mockEnv
+      )
+
+      expect(result.title).toBe('Hello World')
+      expect(result.content).toBe('This is **markdown**.')
     })
   })
 
@@ -108,14 +128,14 @@ describe('extractContent', () => {
   describe('unsupported mimetype', () => {
     it('throws error for unsupported mimetype', async () => {
       await expect(
-        extractContent('originals/ab/cd/abcd1234', 'application/pdf', mockEnv)
-      ).rejects.toThrow('Unsupported mimetype: application/pdf')
+        extractContent('originals/ab/cd/abcd1234', 'application/json', mockEnv)
+      ).rejects.toThrow('Unsupported mimetype: application/json')
     })
 
-    it('throws error for image mimetype', async () => {
+    it('throws error for audio mimetype', async () => {
       await expect(
-        extractContent('originals/ab/cd/abcd1234', 'image/png', mockEnv)
-      ).rejects.toThrow('Unsupported mimetype: image/png')
+        extractContent('originals/ab/cd/abcd1234', 'audio/mpeg', mockEnv)
+      ).rejects.toThrow('Unsupported mimetype: audio/mpeg')
     })
 
     it('does not call R2 get for unsupported mimetype', async () => {
@@ -148,7 +168,7 @@ describe('extractContent', () => {
 
   describe('R2 storage', () => {
     it('saves content to R2 with correct content-type', async () => {
-      const content = '# Test Content'
+      const content = 'Test content body.\n\n## Section'
       const mockR2 = mockEnv.DOCUMENTS as unknown as {
         get: ReturnType<typeof vi.fn>
         put: ReturnType<typeof vi.fn>
