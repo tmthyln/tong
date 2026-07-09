@@ -1,5 +1,8 @@
 fastapi==0.115.12
 uvicorn[standard]==0.34.0
 umap-learn==0.5.7
-scikit-learn==1.5.2
+scikit-learn==1.6.1
 numpy==1.26.4
+toponymy==0.5.2
+jieba==0.42.1
+httpx==0.28.1

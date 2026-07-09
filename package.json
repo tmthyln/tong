@@ -15,7 +15,7 @@
 	},
 	"dependencies": {
 		"@cloudflare/ai-chat": "^0.8.5",
-		"@cloudflare/containers": "^0.2.1",
+		"@cloudflare/containers": "^0.3.7",
 		"@mdi/font": "^7.4.47",
 		"@vueuse/core": "^14.2.1",
 		"agents": "^0.16.0",
@@ -32,7 +32,7 @@
 		"zod": "^4.4.3"
 	},
 	"devDependencies": {
-		"@cloudflare/vite-plugin": "^1.22.0",
+		"@cloudflare/vite-plugin": "^1.43.1",
 		"@tsconfig/node24": "^24.0.4",
 		"@types/d3": "^7.4.3",
 		"@types/diff": "^7.0.2",
@@ -45,7 +45,7 @@
 		"vite-plugin-vue-devtools": "^8.0.5",
 		"vitest": "^4.0.18",
 		"vue-tsc": "^3.2.2",
-		"wrangler": "^4.61.1"
+		"wrangler": "^4.107.1"
 	},
 	"engines": {
 		"node": "^20.19.0 || >=22.12.0"
