@@ -330,44 +330,10 @@ function triggerUploadToFolder() {
 async function handleFolderFileUpload(event: Event) {
   const target = event.target as HTMLInputElement
   const file = target.files?.[0]
-  if (!file || uploadTargetFolderId.value === null) return
-
-  uploading.value = true
-  uploadError.value = null
-  uploadSuccess.value = null
-
-  try {
-    const formData = new FormData()
-    formData.append('file', file)
-    formData.append('folderId', uploadTargetFolderId.value.toString())
-
-    const response = await fetch('/api/library/document', {
-      method: 'POST',
-      body: formData,
-    })
-
-    const result = await response.json()
-
-    if (!response.ok) {
-      throw new Error(result.error || 'Upload failed')
-    }
-
-    if (result.alreadyExists) {
-      uploadSuccess.value = `Document already exists (ID: ${result.documentId})`
-    } else {
-      uploadSuccess.value = `Document uploaded to folder successfully.`
-      await fetchDocuments()
-      await fetchDirectoryTree()
-    }
-  } catch (err) {
-    uploadError.value = err instanceof Error ? err.message : 'Upload failed'
-  } finally {
-    uploading.value = false
-    uploadTargetFolderId.value = null
-    if (folderFileInput.value) {
-      folderFileInput.value.value = ''
-    }
-  }
+  const folderId = uploadTargetFolderId.value
+  uploadTargetFolderId.value = null
+  if (file && folderId !== null) await uploadFile(file, folderId)
+  target.value = ''
 }
 
 function downloadTreeDocument() {
@@ -498,42 +464,98 @@ function triggerFileInput() {
 async function handleFileUpload(event: Event) {
   const target = event.target as HTMLInputElement
   const file = target.files?.[0]
-  if (!file) return
+  if (file) await uploadFile(file, null)
+  target.value = ''
+}
 
+// Shared by file upload and URL import: POST to an ingest endpoint, report the
+// outcome, and refresh both the table and the tree (the tree lists root-level
+// documents too, so it needs refreshing even without a folder). Throws on error.
+async function postToLibrary(url: string, init: RequestInit, successMessage: string, failMessage: string) {
+  const response = await fetch(url, { method: 'POST', ...init })
+  const result = await response.json()
+  if (!response.ok) {
+    throw new Error(result.error || failMessage)
+  }
+  if (result.alreadyExists) {
+    uploadSuccess.value = `Document already exists (ID: ${result.documentId})`
+  } else {
+    uploadSuccess.value = successMessage
+    await Promise.all([fetchDocuments(), fetchDirectoryTree()])
+  }
+}
+
+async function uploadFile(file: File, folderId: number | null) {
   uploading.value = true
   uploadError.value = null
   uploadSuccess.value = null
-
   try {
     const formData = new FormData()
     formData.append('file', file)
-
-    const response = await fetch('/api/library/document', {
-      method: 'POST',
-      body: formData,
-    })
-
-    const result = await response.json()
-
-    if (!response.ok) {
-      throw new Error(result.error || 'Upload failed')
-    }
-
-    if (result.alreadyExists) {
-      uploadSuccess.value = `Document already exists (ID: ${result.documentId})`
-    } else {
-      uploadSuccess.value = `Document uploaded successfully. Processing started.`
-      // Refresh the document list after successful upload
-      await fetchDocuments()
-    }
+    if (folderId !== null) formData.append('folderId', folderId.toString())
+    await postToLibrary(
+      '/api/library/document',
+      { body: formData },
+      folderId === null
+        ? 'Document uploaded successfully. Processing started.'
+        : 'Document uploaded to folder successfully.',
+      'Upload failed'
+    )
   } catch (err) {
     uploadError.value = err instanceof Error ? err.message : 'Upload failed'
   } finally {
     uploading.value = false
-    // Reset file input
-    if (fileInput.value) {
-      fileInput.value.value = ''
-    }
+  }
+}
+
+// Import webpage by URL (issue #8) — optionally into a folder
+const importUrlDialog = ref(false)
+const importUrl = ref('')
+const importUrlFolderId = ref<number | null>(null)
+const importUrlFolderName = ref<string | null>(null)
+const importingUrl = ref(false)
+const importUrlError = ref<string | null>(null)
+
+function openImportUrlDialog(folderId: number | null = null, folderName: string | null = null) {
+  importUrl.value = ''
+  importUrlError.value = null
+  importUrlFolderId.value = folderId
+  importUrlFolderName.value = folderName
+  importUrlDialog.value = true
+}
+
+function triggerImportUrlToFolder() {
+  if (!contextMenuTarget.value || contextMenuTarget.value.type !== 'folder') return
+  const folderId = parseInt(contextMenuTarget.value.id.replace('group-', ''), 10)
+  contextMenu.value = false
+  openImportUrlDialog(folderId, contextMenuTarget.value.name)
+}
+
+async function submitImportUrl() {
+  const url = importUrl.value.trim()
+  if (!url) return
+
+  importingUrl.value = true
+  importUrlError.value = null
+  uploadError.value = null
+  uploadSuccess.value = null
+
+  try {
+    await postToLibrary(
+      '/api/library/document/url',
+      {
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url, folderId: importUrlFolderId.value }),
+      },
+      'Webpage imported. Processing started.',
+      'Import failed'
+    )
+    importUrlDialog.value = false
+  } catch (err) {
+    // Keep the dialog open so the URL can be corrected.
+    importUrlError.value = err instanceof Error ? err.message : 'Import failed'
+  } finally {
+    importingUrl.value = false
   }
 }
 </script>
@@ -670,6 +692,16 @@ async function handleFileUpload(event: Event) {
           >
             Upload Document
           </v-btn>
+          <v-btn
+            class="ml-2"
+            variant="tonal"
+            color="primary"
+            prepend-icon="mdi-web"
+            data-testid="import-url-button"
+            @click="openImportUrlDialog()"
+          >
+            Import from URL
+          </v-btn>
         </div>
       </div>
 
@@ -744,6 +776,45 @@ async function handleFileUpload(event: Event) {
         </template>
       </v-data-table>
     </section>
+
+    <!-- Import from URL Dialog -->
+    <v-dialog v-model="importUrlDialog" max-width="560" :persistent="importingUrl">
+      <v-card>
+        <v-card-title>Import Webpage</v-card-title>
+        <v-card-subtitle v-if="importUrlFolderName">Into folder: {{ importUrlFolderName }}</v-card-subtitle>
+        <v-card-text>
+          <v-alert v-if="importUrlError" type="error" density="compact" class="mb-4">
+            {{ importUrlError }}
+          </v-alert>
+          <v-text-field
+            v-model="importUrl"
+            label="URL"
+            placeholder="https://example.com/article"
+            variant="outlined"
+            type="url"
+            autofocus
+            :disabled="importingUrl"
+            hint="The page is fetched by the server, its main content converted to Markdown, then processed like an upload. Links to PDFs and other supported files also work."
+            persistent-hint
+            data-testid="import-url-input"
+            @keyup.enter="submitImportUrl"
+          />
+        </v-card-text>
+        <v-card-actions>
+          <v-spacer />
+          <v-btn :disabled="importingUrl" @click="importUrlDialog = false">Cancel</v-btn>
+          <v-btn
+            color="primary"
+            :loading="importingUrl"
+            :disabled="!importUrl.trim()"
+            data-testid="import-url-submit"
+            @click="submitImportUrl"
+          >
+            Import
+          </v-btn>
+        </v-card-actions>
+      </v-card>
+    </v-dialog>
 
     <!-- Create Folder Dialog -->
     <v-dialog v-model="createFolderDialog" max-width="400">
@@ -958,6 +1029,9 @@ async function handleFileUpload(event: Event) {
         <template v-if="contextMenuTarget?.type === 'folder'">
           <v-list-item prepend-icon="mdi-upload" @click="triggerUploadToFolder">
             <v-list-item-title>Upload to Folder</v-list-item-title>
+          </v-list-item>
+          <v-list-item prepend-icon="mdi-web" @click="triggerImportUrlToFolder">
+            <v-list-item-title>Import URL to Folder</v-list-item-title>
           </v-list-item>
           <v-list-item prepend-icon="mdi-pencil" @click="openRenameFolderDialog">
             <v-list-item-title>Edit Folder</v-list-item-title>

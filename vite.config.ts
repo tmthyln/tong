@@ -20,7 +20,9 @@ export default defineConfig({
 		cloudflare(),
 		// Transforms the Agents SDK's TC39 @callable decorators (Oxc/dev can't
 		// parse them) — without this `npm run dev` fails to start.
-		agents(),
+		// stubTurndown: false — Defuddle (webpage import, issue #8) needs the real
+		// turndown for HTML → Markdown; the default stub returns "".
+		agents({ stubTurndown: false }),
 	],
 	resolve: {
 		alias: {

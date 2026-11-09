@@ -22,14 +22,24 @@ async function computeContentHash(data: ArrayBuffer): Promise<string> {
   return hashArray.map((b) => b.toString(16).padStart(2, '0')).join('')
 }
 
-export async function storeUploadedFile(
-  file: File,
+export interface OriginalFileInput {
+  data: ArrayBuffer
+  filename: string
+  mimetype: string
+  /** Extra R2 custom metadata (e.g. sourceUrl/charset for imported webpages). */
+  customMetadata?: Record<string, string>
+}
+
+/**
+ * Store original document bytes in R2 under a content-hash path, deduplicating
+ * against existing documents with the same hash.
+ */
+export async function storeOriginalFile(
+  input: OriginalFileInput,
   env: Env
 ): Promise<UploadedFileInfo> {
-  const arrayBuffer = await file.arrayBuffer()
+  const { data: arrayBuffer, filename, mimetype } = input
   const contentHash = await computeContentHash(arrayBuffer)
-  const filename = file.name
-  const mimetype = file.type || 'application/octet-stream'
 
   // Check if file with same hash already exists
   const existing = await env.DB.prepare(
@@ -57,6 +67,7 @@ export async function storeUploadedFile(
       contentType: mimetype,
     },
     customMetadata: {
+      ...input.customMetadata,
       originalFilename: filename,
       contentHash,
     },
@@ -69,4 +80,18 @@ export async function storeUploadedFile(
     contentHash,
     alreadyExists: false,
   }
+}
+
+export async function storeUploadedFile(
+  file: File,
+  env: Env
+): Promise<UploadedFileInfo> {
+  return storeOriginalFile(
+    {
+      data: await file.arrayBuffer(),
+      filename: file.name,
+      mimetype: file.type || 'application/octet-stream',
+    },
+    env
+  )
 }

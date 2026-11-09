@@ -1,6 +1,18 @@
-import { Hono } from 'hono'
-import { storeUploadedFile } from '../lib/documents'
-import { loadExtractedContent } from '../lib/extract-content'
+import { Hono, type Context } from 'hono'
+import {
+  storeUploadedFile,
+  storeOriginalFile,
+  type NewFileInfo,
+  type UploadedFileInfo,
+} from '../lib/documents'
+import { loadExtractedContent, isSupportedMimetype } from '../lib/extract-content'
+import {
+  fetchWebpage,
+  filenameForUrl,
+  parseImportUrl,
+  WebpageImportError,
+  type FetchedWebpage,
+} from '../lib/webpage'
 import { removeOverlaps } from '../lib/entity-extraction'
 import { getUserId, userType } from '../lib/auth'
 import { extractTermsFromText } from '../lib/text-terms'
@@ -1234,46 +1246,30 @@ async function runScopePromotionAsync(
   }
 }
 
-libraryRoutes.post('/document', async (c) => {
-  const formData = await c.req.formData()
-  const file = formData.get('file')
-  const folderIdStr = formData.get('folderId')
-  const folderId = folderIdStr ? parseInt(folderIdStr as string, 10) : null
+async function folderExists(db: D1Database, folderId: number): Promise<boolean> {
+  const folder = await db.prepare('SELECT id FROM document_group WHERE id = ?').bind(folderId).first()
+  return folder !== null
+}
 
-  if (!file || !(file instanceof File)) {
-    return c.json({ error: 'No file provided' }, 400)
-  }
+type IngestStartResult =
+  | { ok: true; documentId: number; workflowId: string }
+  | { ok: false; error: string }
 
-  // Verify folder exists if provided
-  if (folderId !== null) {
-    const folder = await c.env.DB.prepare('SELECT id FROM document_group WHERE id = ?')
-      .bind(folderId)
-      .first()
-
-    if (!folder) {
-      return c.json({ error: 'Folder not found' }, 404)
-    }
-  }
-
-  const fileInfo = await storeUploadedFile(file, c.env)
-
-  if (fileInfo.alreadyExists) {
-    return c.json({
-      message: 'Document already exists',
-      documentId: fileInfo.existingId,
-      alreadyExists: true,
-    })
-  }
-
+// Create the document row for a newly stored original and kick off ingestion.
+async function createDocumentAndIngest(
+  env: Env,
+  fileInfo: NewFileInfo,
+  folderId: number | null
+): Promise<IngestStartResult> {
   // A document uploaded into a folder inherits that folder's nearest-ancestor
   // knowledge-scope affinity (it has no scope of its own yet).
-  const knowledgeScopeId = await resolveFolderAffinity(c.env.DB, folderId)
+  const knowledgeScopeId = await resolveFolderAffinity(env.DB, folderId)
   const dateUploaded = new Date().toISOString()
 
   // Create the document row immediately (extraction fields are NULL until the
   // workflow's first phase completes) so it shows up as "Pending" right away,
   // and so a failed extraction still leaves a visible row.
-  const created = await c.env.DB.prepare(
+  const created = await env.DB.prepare(
     `INSERT INTO document (
       original_doc_location,
       original_doc_filename,
@@ -1297,11 +1293,11 @@ libraryRoutes.post('/document', async (c) => {
     .first<{ id: number }>()
 
   if (!created) {
-    return c.json({ error: 'Failed to create document record' }, 500)
+    return { ok: false, error: 'Failed to create document record' }
   }
 
   // Kick off the ingestion workflow for new documents
-  const instance = await c.env.INGEST_DOCUMENT_WORKFLOW.create({
+  const instance = await env.INGEST_DOCUMENT_WORKFLOW.create({
     params: {
       documentId: created.id,
       location: fileInfo.location,
@@ -1314,15 +1310,110 @@ libraryRoutes.post('/document', async (c) => {
     },
   })
 
+  return { ok: true, documentId: created.id, workflowId: instance.id }
+}
+
+// Shared tail of the upload and URL-import routes: report a duplicate, or
+// create the document row, start ingestion, and respond 201.
+async function respondWithIngest(
+  c: Context<{ Bindings: Env }>,
+  fileInfo: UploadedFileInfo,
+  folderId: number | null,
+  message: string,
+  extra: Record<string, string> = {}
+) {
+  if (fileInfo.alreadyExists) {
+    return c.json({
+      message: 'Document already exists',
+      documentId: fileInfo.existingId,
+      alreadyExists: true,
+    })
+  }
+
+  const started = await createDocumentAndIngest(c.env, fileInfo, folderId)
+  if (!started.ok) {
+    return c.json({ error: started.error }, 500)
+  }
+
   return c.json(
     {
-      message: 'Document uploaded and processing started',
-      workflowId: instance.id,
-      documentId: created.id,
+      message,
+      workflowId: started.workflowId,
+      documentId: started.documentId,
+      ...extra,
       alreadyExists: false,
     },
     201
   )
+}
+
+libraryRoutes.post('/document', async (c) => {
+  const formData = await c.req.formData()
+  const file = formData.get('file')
+  const folderIdStr = formData.get('folderId')
+  const folderId = folderIdStr ? parseInt(folderIdStr as string, 10) : null
+
+  if (!file || !(file instanceof File)) {
+    return c.json({ error: 'No file provided' }, 400)
+  }
+
+  // Verify folder exists if provided
+  if (folderId !== null && !(await folderExists(c.env.DB, folderId))) {
+    return c.json({ error: 'Folder not found' }, 404)
+  }
+
+  const fileInfo = await storeUploadedFile(file, c.env)
+  return respondWithIngest(c, fileInfo, folderId, 'Document uploaded and processing started')
+})
+
+// Import a webpage (or any supported file) by URL (issue #8). The page is
+// fetched server-side with a browser user agent, its raw bytes stored as the
+// original, and the normal ingestion pipeline converts it to Markdown.
+libraryRoutes.post('/document/url', async (c) => {
+  const body = await c.req.json<{ url?: unknown; folderId?: unknown }>().catch(() => null)
+  if (!body || typeof body.url !== 'string' || !body.url.trim()) {
+    return c.json({ error: 'No URL provided' }, 400)
+  }
+  const folderId =
+    body.folderId === null || body.folderId === undefined || body.folderId === ''
+      ? null
+      : Number(body.folderId)
+  if (folderId !== null && !Number.isInteger(folderId)) {
+    return c.json({ error: 'Invalid folderId' }, 400)
+  }
+  if (folderId !== null && !(await folderExists(c.env.DB, folderId))) {
+    return c.json({ error: 'Folder not found' }, 404)
+  }
+
+  let page: FetchedWebpage
+  try {
+    page = await fetchWebpage(parseImportUrl(body.url))
+  } catch (err) {
+    if (err instanceof WebpageImportError) {
+      return c.json({ error: err.message }, err.status)
+    }
+    throw err
+  }
+
+  if (!isSupportedMimetype(page.mimetype)) {
+    return c.json({ error: `Unsupported content type at URL: ${page.mimetype}` }, 415)
+  }
+
+  const fileInfo = await storeOriginalFile(
+    {
+      data: page.data,
+      filename: filenameForUrl(page.url, page.mimetype),
+      mimetype: page.mimetype,
+      customMetadata: {
+        sourceUrl: page.url,
+        ...(page.charset ? { charset: page.charset } : {}),
+      },
+    },
+    c.env
+  )
+  return respondWithIngest(c, fileInfo, folderId, 'Webpage imported and processing started', {
+    sourceUrl: page.url,
+  })
 })
 
 export default libraryRoutes

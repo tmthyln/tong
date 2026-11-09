@@ -246,3 +246,34 @@ describe('loadExtractedContent', () => {
     )
   })
 })
+describe('extractContent text/html', () => {
+  it('converts HTML with Defuddle, decoding the stored charset and resolving links against sourceUrl', async () => {
+    const mockEnv = createMockEnv()
+    const html =
+      '<html><head><title>静夜思</title></head><body><article><h1>静夜思</h1>' +
+      '<p>床前明月光，疑是地上霜。<a href="/libai">李白</a>的作品。</p>' +
+      '<p>举头望明月，低头思故乡。这是一首非常有名的唐诗，几乎每个中国人都会背诵。</p></article></body></html>'
+    const bytes = new TextEncoder().encode(html)
+    const mockR2 = mockEnv.DOCUMENTS as unknown as {
+      get: ReturnType<typeof vi.fn>
+      put: ReturnType<typeof vi.fn>
+    }
+    mockR2.get.mockResolvedValue({
+      arrayBuffer: vi.fn().mockResolvedValue(bytes.buffer),
+      customMetadata: { sourceUrl: 'https://poems.example.cn/jys', charset: 'utf-8' },
+      httpMetadata: { contentType: 'text/html' },
+    })
+
+    const result = await extractContent('originals/ab/cd/abcd1234', 'text/html', mockEnv)
+
+    expect(result.title).toBe('静夜思')
+    expect(result.content).toContain('床前明月光，疑是地上霜。')
+    expect(result.content).toContain('[李白](https://poems.example.cn/libai)')
+    expect(result.content).not.toMatch(/^# /m)
+    expect(mockR2.put).toHaveBeenCalledWith(
+      'extracted/ab/cd/abcd1234.md',
+      result.content,
+      expect.anything()
+    )
+  })
+})

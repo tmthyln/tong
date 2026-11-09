@@ -65,7 +65,9 @@ npm run test:e2e  # Playwright e2e tests (e2e/*.spec.ts; boots npm run dev on po
 
 **Lexicon**: Durable Object–backed vocabulary tracker with learn/fail counts and tags.
 
-**Library**: Document upload (PDF/DOCX → Markdown → chunks), folder organization, collection tree.
+**Library**: Document upload (PDF/DOCX → Markdown → chunks), webpage import by URL, folder organization, collection tree.
+
+**Webpage import** (issue #8): `POST /api/library/document/url` fetches the page server-side with a browser UA (`server/lib/webpage.ts`), stores the raw bytes as the original (R2 `customMetadata.sourceUrl`/`charset`), and the ingest workflow converts `text/html` with Defuddle (kepano's Obsidian Web Clipper extractor) over linkedom, honouring GBK/Big5 charsets. Non-HTML URLs (e.g. PDFs) go through the normal mimetype path; generic `application/octet-stream` downloads are resolved by magic bytes / URL extension (`resolveMimetype`). Known gap: Defuddle pads inline elements with spaces (`有着 [文化](…) 。`), which is wrong for CJK — to be fixed upstream rather than post-processed here. **Gotcha:** the `agents()` Vite plugin stubs `turndown` by default (Defuddle would then return empty Markdown) — `vite.config.ts` passes `stubTurndown: false`; keep it.
 
 **Authentication**: Three user types: `public` (read-only), `authenticated` (`user:*`), `test` (24-hour expiry via DO alarm). Session in httpOnly cookie.
 

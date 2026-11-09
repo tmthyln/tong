@@ -1,3 +1,5 @@
+import { decodeHtml, htmlToMarkdown, parseContentType } from './webpage'
+
 // Mimetypes that can be passed directly as text
 const TEXT_MIMETYPES = ['text/plain', 'text/markdown'] as const
 type TextMimetype = (typeof TEXT_MIMETYPES)[number]
@@ -40,6 +42,11 @@ function isTextMimetype(mimetype: string): mimetype is TextMimetype {
 
 function isAiConvertibleMimetype(mimetype: string): mimetype is AiConvertibleMimetype {
   return AI_CONVERTIBLE_MIMETYPES.includes(mimetype as AiConvertibleMimetype)
+}
+
+/** Whether the ingestion pipeline can extract text from this mimetype. */
+export function isSupportedMimetype(mimetype: string): boolean {
+  return isTextMimetype(mimetype) || isAiConvertibleMimetype(mimetype)
 }
 
 function getExtractedLocation(originalLocation: string): string {
@@ -127,9 +134,29 @@ export async function extractContent(
   let markdownContent: string
   const filename = location.split('/').pop() || 'document'
 
+  let htmlTitle: string | null = null
+
   if (isTextMimetype(mimetype)) {
     // Text files can be used directly
     markdownContent = await object.text()
+  } else if (mimetype === 'text/html') {
+    // Webpages (imported by URL or uploaded): extract the main content with
+    // Defuddle; fall back to AI conversion if that finds nothing.
+    const bytes = new Uint8Array(await object.arrayBuffer())
+    const sourceUrl = object.customMetadata?.sourceUrl
+    const charset =
+      object.customMetadata?.charset ?? parseContentType(object.httpMetadata?.contentType ?? null).charset
+    const html = decodeHtml(bytes, charset)
+    const converted = await htmlToMarkdown(html, sourceUrl).catch((err) => {
+      console.warn('Defuddle HTML conversion failed; falling back to AI', err)
+      return null
+    })
+    if (converted && converted.markdown) {
+      markdownContent = converted.markdown
+      htmlTitle = converted.title
+    } else {
+      markdownContent = await convertWithAI(new Blob([bytes]), `${filename}.html`, env)
+    }
   } else if (isAiConvertibleMimetype(mimetype)) {
     // Use Cloudflare AI markdown conversion
     const blob = await object.blob()
@@ -141,7 +168,12 @@ export async function extractContent(
   const extractedLocation = getExtractedLocation(location)
 
   // Extract title from markdown content
-  const { title, content: finalContent } = extractTitleFromMarkdown(markdownContent)
+  const extracted = extractTitleFromMarkdown(markdownContent)
+  const title = htmlTitle ?? extracted.title
+  // Defuddle already removed the title heading (or demoted it); only strip a
+  // lone H1 when it duplicates the page title or there is no page title.
+  const finalContent =
+    htmlTitle === null || extracted.title === htmlTitle ? extracted.content : markdownContent
 
   // Save extracted markdown to R2
   await env.DOCUMENTS.put(extractedLocation, finalContent, {
