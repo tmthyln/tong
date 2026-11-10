@@ -35,7 +35,7 @@ import {
 import {
   promoteDocumentToScope,
   promoteDocumentRelationshipsToScope,
-  SCOPE_PROMOTION_MODEL,
+  SCOPE_PROMOTION_LINKER,
 } from '../lib/scope-promotion'
 
 const LLM_STEP_RETRIES = { retries: { limit: 4, delay: '5 second', backoff: 'exponential' } } as const
@@ -60,7 +60,7 @@ async function runScopePromotion(
     const runId = await startEnrichmentRun(env.DB, {
       documentId: triggerDocumentId,
       kind: 'entity_resolution',
-      model: SCOPE_PROMOTION_MODEL,
+      model: SCOPE_PROMOTION_LINKER,
       params: { knowledge_scope_id: knowledgeScopeId },
       ontology,
     })
@@ -81,7 +81,7 @@ async function runScopePromotion(
         const retroId = await startEnrichmentRun(env.DB, {
           documentId: m,
           kind: 'entity_resolution_retroactive',
-          model: SCOPE_PROMOTION_MODEL,
+          model: SCOPE_PROMOTION_LINKER,
           params: { knowledge_scope_id: knowledgeScopeId, triggered_by_document_id: triggerDocumentId },
           ontology,
         })
@@ -456,18 +456,16 @@ export class IngestDocumentWorkflow extends WorkflowEntrypoint<Env, IngestDocume
           documentId,
           kind: 'coreference_resolution',
           model: COREFERENCE_MODEL,
-          params: { temperature: 0, max_tokens: 1024, response_format: 'json_object' },
+          params: { strategy: 'surface-forms', context: false, temperature: 0, response_format: 'json_object' },
           ontology: entityTypeContext.nodeOntology,
         })
         try {
-          await resolveDocumentCoreference(documentId, this.env)
-          const docEntitiesRow = await this.env.DB.prepare(
-            `SELECT COUNT(*) AS n FROM extracted_entity WHERE source_document_id = ? AND scope = 'document'`
-          )
-            .bind(documentId)
-            .first<{ n: number }>()
+          // Non-fatal on model failure: falls back to identical-text grouping and reports errors.
+          const coref = await resolveDocumentCoreference(documentId, this.env)
           await completeEnrichmentRun(this.env.DB, corefRunId, {
-            document_entities_created: docEntitiesRow?.n ?? 0,
+            document_entities_created: coref.documentEntities,
+            chunk_entities_linked: coref.chunkEntitiesLinked,
+            model_errors: coref.errors.length,
           })
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err)

@@ -19,7 +19,7 @@ import { extractTermsFromText } from '../lib/text-terms'
 import {
   promoteDocumentToScope,
   promoteDocumentRelationshipsToScope,
-  SCOPE_PROMOTION_MODEL,
+  SCOPE_PROMOTION_LINKER,
 } from '../lib/scope-promotion'
 import {
   startEnrichmentRun,
@@ -1203,7 +1203,7 @@ async function runScopePromotionAsync(
   const runId = await startEnrichmentRun(env.DB, {
     documentId: triggerDocumentId,
     kind: 'entity_resolution',
-    model: SCOPE_PROMOTION_MODEL,
+    model: SCOPE_PROMOTION_LINKER,
     params: { knowledge_scope_id: knowledgeScopeId, trigger: 'late_assignment' },
     ontology,
   })
@@ -1223,7 +1223,7 @@ async function runScopePromotionAsync(
       const retroId = await startEnrichmentRun(env.DB, {
         documentId: m,
         kind: 'entity_resolution_retroactive',
-        model: SCOPE_PROMOTION_MODEL,
+        model: SCOPE_PROMOTION_LINKER,
         params: {
           knowledge_scope_id: knowledgeScopeId,
           triggered_by_document_id: triggerDocumentId,

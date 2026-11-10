@@ -1,100 +1,101 @@
 import { describe, it, expect, vi } from 'vitest'
-import {
-  defaultIsCoreferent,
-  groupCandidatesByComponent,
-  classifyComponent,
-  promoteDocumentToScope,
-  promoteDocumentRelationshipsToScope,
-} from './scope-promotion'
+import { promoteDocumentToScope, promoteDocumentRelationshipsToScope } from './scope-promotion'
+import { createSqliteD1, fixtures } from './testing/sqlite-d1'
+import type { KbEntity, LinkQuery } from './extraction/resolve'
+import type { ChatRequest, LlmClient } from './extraction/llm'
 
-interface PromotionCandidate {
-  id: number
-  entityType: string
-  label: string
-  sourceDocumentId: number | null
+// ── promoteDocumentToScope against a migrated in-memory database ──────────
+
+/**
+ * Two-chunk documents whose chunk mentions are already grouped under
+ * document-scope entities (as coreference leaves them).
+ */
+function seed() {
+  const { db, d1 } = createSqliteD1()
+  const scope = fixtures.scope(db)
+  const docEntity = (docId: number, label: string, type: string, mentionIds: number[]) => {
+    const id = Number(db.prepare(`INSERT INTO extracted_entity (source_document_id, entity_type, label, scope) VALUES (?, ?, ?, 'document')`).run(docId, type, label).lastInsertRowid)
+    for (const m of mentionIds) db.prepare('UPDATE extracted_entity SET parent_id = ? WHERE id = ?').run(id, m)
+    return id
+  }
+  const addDoc = (text: string, entities: Array<{ label: string; type: string; forms: string[] }>) => {
+    const docId = fixtures.document(db, scope)
+    const chunk = fixtures.chunk(db, docId, 0, text)
+    const ids = entities.map((e) => docEntity(docId, e.label, e.type, e.forms.flatMap((f) => fixtures.mentions(db, docId, chunk, f, e.type))))
+    return { docId, ids }
+  }
+  const parentOf = (id: number) => (db.prepare('SELECT parent_id FROM extracted_entity WHERE id = ?').get(id) as { parent_id: number | null }).parent_id
+  const scopeEntities = () => db.prepare(`SELECT id, label FROM extracted_entity WHERE scope = 'scope'`).all() as Array<{ id: number; label: string }>
+  return { db, env: { DB: d1, AI: { run: vi.fn() } } as unknown as Env, scope, addDoc, parentOf, scopeEntities }
 }
 
-const cand = (
-  id: number,
-  entityType: string,
-  label: string,
-  sourceDocumentId: number | null
-): PromotionCandidate => ({ id, entityType, label, sourceDocumentId })
+/** Linker stub: link each query to the KB entry whose label is in `pairs[query.label]`. */
+const linkByLabel = (pairs: Record<string, string>) => async (queries: LinkQuery[], kb: KbEntity[]) =>
+  new Map(queries.map((q) => [q.id, kb.find((e) => e.label === pairs[q.label])?.id ?? null] as const))
 
-describe('defaultIsCoreferent', () => {
-  it('matches identical labels of the same type', () => {
-    expect(defaultIsCoreferent(cand(1, 'Person', '孔子', 1), cand(2, 'Person', '孔子', 2))).toBe(true)
+describe('promoteDocumentToScope', () => {
+  it('returns skipped when only one document is in the scope', async () => {
+    const s = seed()
+    s.addDoc('劉備在涿縣。劉備。', [{ label: '劉備', type: 'PERSON', forms: ['劉備'] }])
+    const result = await promoteDocumentToScope(1, s.scope, s.env, { link: linkByLabel({}) })
+    expect(result.skipped).toBe('only_one_document_in_scope')
   })
 
-  it('rejects matches across types', () => {
-    expect(defaultIsCoreferent(cand(1, 'Person', '北京', 1), cand(2, 'Place', '北京', 2))).toBe(false)
+  it('mints a scope entity when a new document links to another document\'s entity', async () => {
+    const s = seed()
+    const a = s.addDoc('劉備起兵。劉備。', [{ label: '劉備', type: 'PERSON', forms: ['劉備'] }])
+    const b = s.addDoc('玄德曰：劉玄德。玄德。', [{ label: '劉玄德', type: 'PERSON', forms: ['玄德', '劉玄德'] }])
+    const result = await promoteDocumentToScope(b.docId, s.scope, s.env, { link: linkByLabel({ 劉玄德: '劉備' }) })
+    expect(result).toMatchObject({ scopeEntitiesCreated: 1, scopeEntitiesLinked: 0, affectedDocumentIds: [a.docId], skipped: null })
+    const [se] = s.scopeEntities()
+    expect(s.parentOf(a.ids[0])).toBe(se.id)
+    expect(s.parentOf(b.ids[0])).toBe(se.id)
   })
 
-  it('fuzzy-matches near-identical labels when both are length ≥ 3', () => {
-    // 长安城 vs 长安市 — same type, length 3, edit distance 1/3 < 0.3? actually 1/3 ≈ 0.33; pick a closer pair
-    expect(defaultIsCoreferent(cand(1, 'Place', '长安城', 1), cand(2, 'Place', '长安城邦', 2))).toBe(true)
+  it('links to an existing scope entity (third document)', async () => {
+    const s = seed()
+    const a = s.addDoc('劉備起兵。劉備。', [{ label: '劉備', type: 'PERSON', forms: ['劉備'] }])
+    const b = s.addDoc('劉備曰。劉備。', [{ label: '劉備', type: 'PERSON', forms: ['劉備'] }])
+    await promoteDocumentToScope(b.docId, s.scope, s.env, { link: linkByLabel({ 劉備: '劉備' }) })
+    const c = s.addDoc('玄德至。玄德。', [{ label: '玄德', type: 'PERSON', forms: ['玄德'] }])
+    const result = await promoteDocumentToScope(c.docId, s.scope, s.env, { link: linkByLabel({ 玄德: '劉備' }) })
+    expect(result).toMatchObject({ scopeEntitiesCreated: 0, scopeEntitiesLinked: 1 })
+    expect(s.scopeEntities()).toHaveLength(1)
+    expect(s.parentOf(c.ids[0])).toBe(s.parentOf(a.ids[0]))
   })
 
-  it('rejects fuzzy match when either label is shorter than 3', () => {
-    expect(defaultIsCoreferent(cand(1, 'Place', '北京市', 1), cand(2, 'Place', '北京', 2))).toBe(false)
+  it('leaves unlinked entities unpromoted', async () => {
+    const s = seed()
+    s.addDoc('王曰。王。', [{ label: '王', type: 'PERSON', forms: ['王'] }])
+    const b = s.addDoc('王至。王。', [{ label: '王', type: 'PERSON', forms: ['王'] }])
+    const result = await promoteDocumentToScope(b.docId, s.scope, s.env, { link: linkByLabel({}) })
+    expect(result.scopeEntitiesCreated).toBe(0)
+    expect(s.parentOf(b.ids[0])).toBeNull()
   })
 
-  it('rejects short fuzzy candidates', () => {
-    expect(defaultIsCoreferent(cand(1, 'Place', '北', 1), cand(2, 'Place', '南', 2))).toBe(false)
-  })
-})
-
-describe('groupCandidatesByComponent', () => {
-  it('groups connected same-type candidates into components', () => {
-    const all: PromotionCandidate[] = [
-      cand(1, 'Person', '孔子', 1),
-      cand(2, 'Person', '孔子', 2),
-      cand(3, 'Place', '北京', 1),
-      cand(4, 'Place', '北京', 3),
-      cand(5, 'Person', 'unmatched', 1),
-    ]
-    const comps = groupCandidatesByComponent(all, defaultIsCoreferent)
-    expect(comps).toHaveLength(2)
-    const ids = comps.map((c) => c.map((m) => m.id).sort())
-    expect(ids).toContainEqual([1, 2])
-    expect(ids).toContainEqual([3, 4])
-  })
-
-  it('excludes singletons (no neighbor)', () => {
-    const all = [cand(1, 'X', 'a', 1), cand(2, 'X', 'totally different', 2)]
-    expect(groupCandidatesByComponent(all, defaultIsCoreferent)).toHaveLength(0)
-  })
-})
-
-describe('classifyComponent', () => {
-  it('links to an anchor when present (even with one doc member)', () => {
-    const v = classifyComponent([cand(1, 'Person', '孔子', null), cand(2, 'Person', '孔子', 1)])
-    expect(v.shouldLinkOnly).toBe(true)
-    expect(v.shouldCreate).toBe(false)
-    expect(v.anchor?.id).toBe(1)
-  })
-
-  it('creates a new scope entity when ≥2 distinct documents agree (no anchor)', () => {
-    const v = classifyComponent([
-      cand(1, 'Person', '孔子', 10),
-      cand(2, 'Person', '孔子', 20),
+  it('gives the linker aliases and contexts from chunk mentions, and auto-links exact matches', async () => {
+    const s = seed()
+    s.addDoc('劉備字玄德。玄德起兵。', [{ label: '劉備', type: 'PERSON', forms: ['劉備', '玄德'] }])
+    const b = s.addDoc('玄德曰：雲長何在？雲長。玄德。', [
+      { label: '玄德', type: 'PERSON', forms: ['玄德'] },
+      { label: '雲長', type: 'PERSON', forms: ['雲長'] },
     ])
-    expect(v.shouldCreate).toBe(true)
-    expect(v.shouldLinkOnly).toBe(false)
-    expect(v.distinctDocCount).toBe(2)
-  })
-
-  it('does nothing when the component is all from one document', () => {
-    const v = classifyComponent([
-      cand(1, 'Place', '北京', 5),
-      cand(2, 'Place', '北京', 5),
-    ])
-    expect(v.shouldCreate).toBe(false)
-    expect(v.shouldLinkOnly).toBe(false)
+    const requests: ChatRequest[] = []
+    const client: LlmClient = {
+      async chat(req) {
+        requests.push(req)
+        return { model: req.model, content: '{"links":{}}', finishReason: 'stop', usage: { promptTokens: 1, completionTokens: 1, cachedPromptTokens: 0, neurons: 0 }, latencyMs: 0 }
+      },
+    }
+    const result = await promoteDocumentToScope(b.docId, s.scope, s.env, { client })
+    // 玄德 is an exact alias of the KB's 劉備 → linked without a call; 雲長 has no candidate → no call.
+    expect(requests).toHaveLength(0)
+    expect(result.scopeEntitiesCreated).toBe(1)
+    expect(s.scopeEntities()[0].label).toBe('劉備')
   })
 })
 
-// ── Mock env for promoteDocumentToScope ──────────────────────
+// ── Mock env for promoteDocumentRelationshipsToScope ─────────────────────
 
 interface FakeStatement {
   bind: (...args: unknown[]) => FakeStatement
@@ -214,87 +215,6 @@ function freshState(overrides: Partial<MockState> = {}): MockState {
     ...overrides,
   }
 }
-
-describe('promoteDocumentToScope — ≥2-doc rule', () => {
-  it('returns skipped when only one document is in the scope', async () => {
-    const state = freshState({ docCount: 1 })
-    const env = makeEnv(state)
-    const result = await promoteDocumentToScope(7, 99, env, {
-      refineGroupsLLM: async (b) => [b],
-    })
-    expect(result.skipped).toBe('only_one_document_in_scope')
-    expect(state.insertedScopeEntities).toHaveLength(0)
-  })
-
-  it('mints a scope entity when ≥2 documents share an entity', async () => {
-    const state = freshState({
-      docCount: 2,
-      triggerEntities: [{ id: 100, entity_type: 'Person', label: '孔子' }],
-      otherEntities: [{ id: 200, entity_type: 'Person', label: '孔子', source_document_id: 5 }],
-    })
-    const env = makeEnv(state)
-    const result = await promoteDocumentToScope(7, 99, env, {
-      refineGroupsLLM: async (b) => [b],
-    })
-    expect(result.skipped).toBeNull()
-    expect(result.scopeEntitiesCreated).toBe(1)
-    expect(result.affectedDocumentIds).toEqual([5])
-    expect(state.insertedScopeEntities).toHaveLength(1)
-    expect(state.insertedScopeEntities[0].label).toBe('孔子')
-    expect(state.insertedScopeEntities[0].knowledge_scope_id).toBe(99)
-    expect(state.parentIdUpdates).toHaveLength(1)
-    expect(state.parentIdUpdates[0].ids.sort()).toEqual([100, 200])
-  })
-
-  it('does NOT mint a scope entity for a single-doc group', async () => {
-    const state = freshState({
-      docCount: 2,
-      triggerEntities: [
-        { id: 100, entity_type: 'Person', label: 'unique' },
-        { id: 101, entity_type: 'Person', label: 'unique' },
-      ],
-      otherEntities: [],
-    })
-    const env = makeEnv(state)
-    const result = await promoteDocumentToScope(7, 99, env, {
-      refineGroupsLLM: async (b) => [b],
-    })
-    expect(result.scopeEntitiesCreated).toBe(0)
-    expect(state.insertedScopeEntities).toHaveLength(0)
-  })
-
-  it('links a new doc to an existing scope entity (3rd doc case)', async () => {
-    const state = freshState({
-      docCount: 3,
-      triggerEntities: [{ id: 100, entity_type: 'Person', label: '孔子' }],
-      scopeEntities: [{ id: 500, entity_type: 'Person', label: '孔子' }],
-    })
-    const env = makeEnv(state)
-    const result = await promoteDocumentToScope(7, 99, env, {
-      refineGroupsLLM: async (b) => [b],
-    })
-    expect(result.scopeEntitiesCreated).toBe(0)
-    expect(result.scopeEntitiesLinked).toBe(1)
-    expect(state.parentIdUpdates).toHaveLength(1)
-    expect(state.parentIdUpdates[0].parentId).toBe(500)
-    expect(state.parentIdUpdates[0].ids).toEqual([100])
-  })
-
-  it('does not mint a scope entity when the LLM splits the batch into single-doc groups', async () => {
-    const state = freshState({
-      docCount: 2,
-      triggerEntities: [{ id: 100, entity_type: 'Person', label: '王' }],
-      otherEntities: [{ id: 200, entity_type: 'Person', label: '王', source_document_id: 5 }],
-    })
-    const env = makeEnv(state)
-    // LLM disambiguates: the two "王" are different people, return them as singleton groups.
-    const result = await promoteDocumentToScope(7, 99, env, {
-      refineGroupsLLM: async () => [],
-    })
-    expect(result.scopeEntitiesCreated).toBe(0)
-    expect(state.insertedScopeEntities).toHaveLength(0)
-  })
-})
 
 describe('promoteDocumentRelationshipsToScope', () => {
   it('promotes a relationship when both endpoints have scope parents', async () => {

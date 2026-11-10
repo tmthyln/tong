@@ -3,7 +3,7 @@ import { getUserId, userType } from '../lib/auth'
 import {
   promoteDocumentToScope,
   promoteDocumentRelationshipsToScope,
-  SCOPE_PROMOTION_MODEL,
+  SCOPE_PROMOTION_LINKER,
 } from '../lib/scope-promotion'
 import {
   startEnrichmentRun,
@@ -195,7 +195,7 @@ knowledgeScopeRoutes.post('/:id/run-promotion', async (c) => {
     const runId = await startEnrichmentRun(c.env.DB, {
       documentId: d.id,
       kind: 'entity_resolution',
-      model: SCOPE_PROMOTION_MODEL,
+      model: SCOPE_PROMOTION_LINKER,
       params: { knowledge_scope_id: id, trigger: 'manual_rerun' },
       ontology,
     })
@@ -217,7 +217,7 @@ knowledgeScopeRoutes.post('/:id/run-promotion', async (c) => {
         const retroId = await startEnrichmentRun(c.env.DB, {
           documentId: m,
           kind: 'entity_resolution_retroactive',
-          model: SCOPE_PROMOTION_MODEL,
+          model: SCOPE_PROMOTION_LINKER,
           params: {
             knowledge_scope_id: id,
             triggered_by_document_id: d.id,

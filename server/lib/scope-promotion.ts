@@ -1,7 +1,27 @@
-import { extractJsonObject } from './llm-utils'
+/**
+ * Cross-document entity resolution within a knowledge scope ("scope promotion"):
+ * link a document's document-scope entities to the scope's knowledge base —
+ * existing scope-level entities, or unpromoted entities of other documents in
+ * the scope — and mint a scope entity when ≥2 documents agree.
+ *
+ * Every entity carries its aliases (the surface forms of its chunk mentions,
+ * already alias-grouped by coreference) and one context snippet. By default a
+ * query links to the KB entity it shares an exact alias with, when that match
+ * is unambiguous — no LLM. In the eval (eval/resolution) this rule beat every
+ * LLM linker (models over-link similar names); `deps.llm` enables the LLM pass
+ * over the remaining queries' top-k candidates for experimentation. The previous
+ * implementation compared labels only (exact or edit distance < 0.3, which never
+ * fires for 2–3 character names) and asked llama-3.3-70b to group ids by label
+ * with no context. Chosen from the local eval (eval/resolution).
+ */
+import { exactAliasMatch, linkEntities, type KbEntity, type LinkQuery } from './extraction/resolve'
+import { workersAiClient, type LlmClient } from './extraction/llm'
 
-export const SCOPE_PROMOTION_MODEL = '@cf/meta/llama-3.3-70b-instruct-fp8-fast'
-type ModelOutput = AiModels[typeof SCOPE_PROMOTION_MODEL]['postProcessedOutputs']
+/** Recorded as the enrichment run's model: the default linker is a rule, not an LLM. */
+export const SCOPE_PROMOTION_LINKER = 'rule:exact-alias'
+
+/** Model for the optional LLM pass (deps.llm); the default linker uses none. */
+export const SCOPE_PROMOTION_MODEL = '@cf/google/gemma-4-26b-a4b-it'
 
 export interface PromoteEntitiesResult {
   scopeEntitiesCreated: number
@@ -14,201 +34,70 @@ export interface PromoteRelationshipsResult {
   relationshipsPromoted: number
 }
 
-interface PromotionCandidate {
-  id: number
-  entityType: string
-  label: string
-  sourceDocumentId: number | null // null marks an existing scope-level anchor
+export interface ScopePromotionDeps {
+  /** Override the linker (tests). Default: linkEntities with exact auto-links + top-8 retrieval. */
+  link?: (queries: LinkQuery[], kb: KbEntity[], env: Env) => Promise<Map<string, string | null>>
+  /** Also ask an LLM about queries without an exact alias match (default false). */
+  llm?: boolean
+  model?: string
+  client?: LlmClient
 }
 
-function normalizedEditDistance(a: string, b: string): number {
-  const m = a.length
-  const n = b.length
-  const dp: number[] = Array.from({ length: n + 1 }, (_, i) => i)
-  for (let i = 1; i <= m; i++) {
-    let prev = dp[0]
-    dp[0] = i
-    for (let j = 1; j <= n; j++) {
-      const temp = dp[j]
-      dp[j] = a[i - 1] === b[j - 1] ? prev : 1 + Math.min(prev, dp[j], dp[j - 1])
-      prev = temp
-    }
-  }
-  return dp[n] / Math.max(m, n)
-}
+/** D1 caps bound parameters per statement at 100. */
+const ID_BATCH = 90
 
-function parseLLMResponse(result: ModelOutput): Record<string, unknown> | null {
-  if (typeof result === 'string') return null
-  if ('response' in result && typeof result.response === 'string') {
-    const raw = result.response
-    return JSON.parse(extractJsonObject(raw)) as Record<string, unknown>
-  }
-  if ('response' in result && result.response && typeof result.response === 'object') {
-    return result.response as Record<string, unknown>
-  }
-  return null
-}
-
-interface ScopePromotionDeps {
-  /**
-   * Override candidate filtering. Default uses exact-match OR (length ≥ 3 AND
-   * normalized edit distance < 0.3) on same-type pairs — mirrors coreference.ts.
-   */
-  isCoreferent?: (a: PromotionCandidate, b: PromotionCandidate) => boolean
-  /**
-   * Refine a candidate component into final merge groups. Default uses the LLM
-   * to disambiguate homonyms; tests can stub this with an identity function.
-   */
-  refineGroupsLLM?: (batch: PromotionCandidate[], env: Env) => Promise<PromotionCandidate[][]>
+interface AliasRow {
+  owner: number
+  text: string
+  n: number
+  ctx: string | null
 }
 
 /**
- * Decide whether two same-type candidates should be considered for merging.
- * Cross-type pairs always return false. Exported for testing.
+ * Aliases (chunk-mention texts, most frequent first) and one context snippet
+ * per owner entity. `ownerExpr` names the column that identifies the owner of
+ * each chunk mention `c` (joined through its document entity `d`).
  */
-export function defaultIsCoreferent(a: PromotionCandidate, b: PromotionCandidate): boolean {
-  if (a.entityType !== b.entityType) return false
-  if (a.label === b.label) return true
-  if (a.label.length < 3 || b.label.length < 3) return false
-  return normalizedEditDistance(a.label, b.label) < 0.3
-}
-
-/**
- * Compute connected components from a candidate list using a same-type
- * coreference predicate. Each component groups candidates that may refer to
- * the same scope-level entity. Singleton components (one candidate that
- * matched nothing) are excluded.
- *
- * Exported for testing.
- */
-export function groupCandidatesByComponent(
-  candidates: PromotionCandidate[],
-  isCoreferent: (a: PromotionCandidate, b: PromotionCandidate) => boolean
-): PromotionCandidate[][] {
-  const n = candidates.length
-  const adj = new Map<number, Set<number>>()
-  for (let i = 0; i < n; i++) {
-    for (let j = i + 1; j < n; j++) {
-      if (isCoreferent(candidates[i], candidates[j])) {
-        if (!adj.has(i)) adj.set(i, new Set())
-        if (!adj.has(j)) adj.set(j, new Set())
-        adj.get(i)!.add(j)
-        adj.get(j)!.add(i)
-      }
+async function loadAliases(env: Env, ownerExpr: string, where: string, binds: unknown[]): Promise<Map<number, { aliases: string[]; context: string | null }>> {
+  const rows = await env.DB.prepare(
+    `SELECT ${ownerExpr} AS owner, c.extracted_text AS text, COUNT(*) AS n, MIN(c.id) AS first_id,
+            substr(tc.content, max(1, c.chunk_start_index - 29), c.chunk_start_index - max(0, c.chunk_start_index - 30))
+              || '【' || c.extracted_text || '】' || substr(tc.content, c.chunk_end_index + 1, 30) AS ctx
+     FROM extracted_entity c
+     JOIN extracted_entity d ON d.id = c.parent_id
+     JOIN text_chunk tc ON tc.id = c.source_chunk_id
+     WHERE c.scope = 'chunk' AND c.extracted_text IS NOT NULL AND d.scope = 'document' AND ${where}
+     GROUP BY owner, text`,
+  )
+    .bind(...binds)
+    .all<AliasRow>()
+  const out = new Map<number, { aliases: Array<[string, number]>; context: string | null; best: number }>()
+  for (const r of rows.results) {
+    let e = out.get(r.owner)
+    if (!e) out.set(r.owner, (e = { aliases: [], context: null, best: -1 }))
+    e.aliases.push([r.text, r.n])
+    if (r.n > e.best) {
+      e.best = r.n
+      e.context = r.ctx ? r.ctx.replace(/\s+/g, ' ') : null
     }
   }
-
-  const visited = new Array<boolean>(n).fill(false)
-  const components: PromotionCandidate[][] = []
-  for (let i = 0; i < n; i++) {
-    if (visited[i]) continue
-    if (!adj.has(i)) continue
-    const queue = [i]
-    visited[i] = true
-    const comp: PromotionCandidate[] = []
-    while (queue.length > 0) {
-      const cur = queue.shift()!
-      comp.push(candidates[cur])
-      for (const nb of adj.get(cur) ?? []) {
-        if (!visited[nb]) {
-          visited[nb] = true
-          queue.push(nb)
-        }
-      }
-    }
-    if (comp.length >= 2) components.push(comp)
-  }
-  return components
+  return new Map(
+    [...out].map(([k, v]) => [k, { aliases: v.aliases.sort((a, b) => b[1] - a[1]).map(([t]) => t), context: v.context }]),
+  )
 }
 
-/**
- * Classify a connected component for the ≥2-document rule.
- * Exported for testing.
- */
-export function classifyComponent(comp: PromotionCandidate[]): {
-  anchor: PromotionCandidate | null      // existing scope entity to link against, if any
-  documentMembers: PromotionCandidate[]   // document-scope members
-  distinctDocCount: number                // distinct source_document_id among document members
-  shouldCreate: boolean                   // mint a new scope entity?
-  shouldLinkOnly: boolean                 // link existing anchor only?
-} {
-  const anchor = comp.find((c) => c.sourceDocumentId === null) ?? null
-  const documentMembers = comp.filter((c) => c.sourceDocumentId !== null)
-  const distinctDocs = new Set(documentMembers.map((c) => c.sourceDocumentId))
-  const distinctDocCount = distinctDocs.size
-
-  if (anchor) {
-    return { anchor, documentMembers, distinctDocCount, shouldCreate: false, shouldLinkOnly: true }
-  }
-  if (distinctDocCount >= 2) {
-    return { anchor: null, documentMembers, distinctDocCount, shouldCreate: true, shouldLinkOnly: false }
-  }
-  return { anchor: null, documentMembers, distinctDocCount, shouldCreate: false, shouldLinkOnly: false }
+function withLabel(aliases: string[] | undefined, label: string): string[] {
+  const a = aliases ?? []
+  return a.includes(label) ? a : [label, ...a]
 }
 
-/**
- * Default LLM refinement: send the candidate batch to the model with the
- * instruction "group ids that refer to the same real-world entity," then map
- * each returned id list back to PromotionCandidate references. If the LLM
- * fails or returns nothing usable, fall back to the batch as a single group.
- */
-async function llmRefineGroups(
-  batch: PromotionCandidate[],
-  env: Env
-): Promise<PromotionCandidate[][]> {
-  const byId = new Map(batch.map((c) => [c.id, c]))
-  const entityLines = batch
-    .map(
-      (c) =>
-        `${c.id} | ${c.entityType} | ${c.label} | ${
-          c.sourceDocumentId === null ? 'scope-anchor' : `doc-${c.sourceDocumentId}`
-        }`
-    )
-    .join('\n')
-
-  const systemPrompt = `You are a cross-document entity resolution system for Chinese knowledge graphs.
-Group the entity IDs that refer to the same real-world entity across documents.
-Rows tagged "scope-anchor" are existing knowledge-scope entities; merging document entities with them links to that anchor.
-Entities of different types must not be merged. Use the labels to decide; homonyms (same text, different referent) should stay separate.
-Return JSON: { "groups": [[id, id, ...], ...] }
-Only include groups of 2 or more. Omit entities that should remain distinct.`
-
-  const userPrompt = `Candidates (id | type | label | source):
-${entityLines}
-
-Group the ids that refer to the same real-world entity.
-Reply with JSON { "groups": [[id, id, ...], ...] }`
-
-  try {
-    const result = await env.AI.run(SCOPE_PROMOTION_MODEL, {
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: userPrompt },
-      ],
-      temperature: 0,
-      max_tokens: 1024,
-      response_format: { type: 'json_object' },
-    })
-
-    const parsed = parseLLMResponse(result)
-    if (!parsed?.groups || !Array.isArray(parsed.groups)) return [batch]
-
-    const groups: PromotionCandidate[][] = []
-    for (const group of parsed.groups as unknown[]) {
-      if (!Array.isArray(group) || group.length < 2) continue
-      const members: PromotionCandidate[] = []
-      for (const id of group) {
-        if (typeof id !== 'number') continue
-        const cand = byId.get(id)
-        if (cand) members.push(cand)
-      }
-      if (members.length >= 2) groups.push(members)
-    }
-    return groups
-  } catch (err) {
-    console.warn('[scope-promotion] LLM refinement failed, keeping batch as one group:', err)
-    return [batch]
+async function setParent(env: Env, parentId: number, ids: number[]) {
+  const stmts: D1PreparedStatement[] = []
+  for (let k = 0; k < ids.length; k += ID_BATCH) {
+    const chunk = ids.slice(k, k + ID_BATCH)
+    stmts.push(env.DB.prepare(`UPDATE extracted_entity SET parent_id = ? WHERE id IN (${chunk.map(() => '?').join(', ')})`).bind(parentId, ...chunk))
   }
+  if (stmts.length) await env.DB.batch(stmts)
 }
 
 /**
@@ -216,13 +105,12 @@ Reply with JSON { "groups": [[id, id, ...], ...] }`
  * given knowledge scope. Idempotent per trigger document; safe to call
  * repeatedly.
  *
- * Rules:
+ * Rules (unchanged):
  * - If the scope has fewer than 2 documents, returns skipped='only_one_document_in_scope'.
- * - A new scope-scope entity is minted only when an LLM group spans entities
- *   from ≥2 distinct source documents.
- * - If a group includes an existing scope-scope entity, every document-scope
- *   member's parent_id is linked to it.
- * - Document-scope entities with no cross-document match remain unpromoted.
+ * - A trigger entity linked to an existing scope entity gets it as parent.
+ * - A trigger entity linked to another document's unpromoted entity mints a new
+ *   scope entity (≥2 distinct documents) that both get as parent.
+ * - Entities with no cross-document match remain unpromoted.
  */
 export async function promoteDocumentToScope(
   triggerDocumentId: number,
@@ -230,174 +118,141 @@ export async function promoteDocumentToScope(
   env: Env,
   deps: ScopePromotionDeps = {}
 ): Promise<PromoteEntitiesResult> {
-  const isCoreferent = deps.isCoreferent ?? defaultIsCoreferent
-  const refineGroupsLLM = deps.refineGroupsLLM ?? llmRefineGroups
-
-  // Step 1: n=1 early exit
-  const docCountRow = await env.DB.prepare(
-    'SELECT COUNT(*) AS n FROM document WHERE knowledge_scope_id = ?'
-  )
+  const docCountRow = await env.DB.prepare('SELECT COUNT(*) AS n FROM document WHERE knowledge_scope_id = ?')
     .bind(knowledgeScopeId)
     .first<{ n: number }>()
-  const docCount = docCountRow?.n ?? 0
-  if (docCount < 2) {
-    return {
-      scopeEntitiesCreated: 0,
-      scopeEntitiesLinked: 0,
-      affectedDocumentIds: [],
-      skipped: 'only_one_document_in_scope',
-    }
+  if ((docCountRow?.n ?? 0) < 2) {
+    return { scopeEntitiesCreated: 0, scopeEntitiesLinked: 0, affectedDocumentIds: [], skipped: 'only_one_document_in_scope' }
   }
 
-  // Step 2: clear stale parent links from the trigger document only
-  await env.DB.prepare(
-    `UPDATE extracted_entity SET parent_id = NULL
-     WHERE source_document_id = ? AND scope = 'document'`
-  )
+  // Clear stale parent links from the trigger document only.
+  await env.DB.prepare(`UPDATE extracted_entity SET parent_id = NULL WHERE source_document_id = ? AND scope = 'document'`)
     .bind(triggerDocumentId)
     .run()
 
-  // Step 3: load trigger doc's document-scope entities
+  // Queries: the trigger document's document-scope entities.
   const triggerRows = await env.DB.prepare(
-    `SELECT id, entity_type, label
-     FROM extracted_entity
-     WHERE source_document_id = ? AND scope = 'document' AND label IS NOT NULL`
+    `SELECT id, entity_type, label FROM extracted_entity
+     WHERE source_document_id = ? AND scope = 'document' AND label IS NOT NULL`,
   )
     .bind(triggerDocumentId)
     .all<{ id: number; entity_type: string; label: string }>()
-  const triggerCandidates: PromotionCandidate[] = triggerRows.results.map((r) => ({
-    id: r.id,
-    entityType: r.entity_type,
-    label: r.label,
-    sourceDocumentId: triggerDocumentId,
-  }))
-
-  if (triggerCandidates.length === 0) {
+  if (triggerRows.results.length === 0) {
     return { scopeEntitiesCreated: 0, scopeEntitiesLinked: 0, affectedDocumentIds: [], skipped: null }
   }
+  const triggerAliases = await loadAliases(env, 'd.id', 'd.source_document_id = ?', [triggerDocumentId])
+  const queries: LinkQuery[] = triggerRows.results.map((r) => ({
+    id: String(r.id),
+    type: r.entity_type,
+    label: r.label,
+    aliases: withLabel(triggerAliases.get(r.id)?.aliases, r.label),
+    context: triggerAliases.get(r.id)?.context ?? undefined,
+  }))
 
-  // Step 4: existing scope-scope entities anchored by this knowledge scope
+  // KB part 1: existing scope entities, with the aliases of all their members.
   const scopeRows = await env.DB.prepare(
-    `SELECT id, entity_type, label
-     FROM extracted_entity
-     WHERE scope = 'scope' AND knowledge_scope_id = ? AND label IS NOT NULL`
+    `SELECT id, entity_type, label FROM extracted_entity
+     WHERE scope = 'scope' AND knowledge_scope_id = ? AND label IS NOT NULL`,
   )
     .bind(knowledgeScopeId)
     .all<{ id: number; entity_type: string; label: string }>()
-  const scopeAnchors: PromotionCandidate[] = scopeRows.results.map((r) => ({
-    id: r.id,
-    entityType: r.entity_type,
-    label: r.label,
-    sourceDocumentId: null,
-  }))
+  const scopeAliases = await loadAliases(
+    env,
+    'd.parent_id',
+    `d.parent_id IN (SELECT id FROM extracted_entity WHERE scope = 'scope' AND knowledge_scope_id = ?)`,
+    [knowledgeScopeId],
+  )
 
-  // Step 5: unpromoted document-scope candidates from other in-scope documents
+  // KB part 2: unpromoted document-scope entities of other in-scope documents.
   const otherRows = await env.DB.prepare(
     `SELECT ee.id, ee.entity_type, ee.label, ee.source_document_id
      FROM extracted_entity ee
      JOIN document d ON d.id = ee.source_document_id
-     WHERE d.knowledge_scope_id = ?
-       AND ee.scope = 'document'
-       AND ee.parent_id IS NULL
-       AND ee.source_document_id != ?
-       AND ee.label IS NOT NULL`
+     WHERE d.knowledge_scope_id = ? AND ee.scope = 'document' AND ee.parent_id IS NULL
+       AND ee.source_document_id != ? AND ee.label IS NOT NULL`,
   )
     .bind(knowledgeScopeId, triggerDocumentId)
     .all<{ id: number; entity_type: string; label: string; source_document_id: number }>()
-  const otherCandidates: PromotionCandidate[] = otherRows.results.map((r) => ({
-    id: r.id,
-    entityType: r.entity_type,
-    label: r.label,
-    sourceDocumentId: r.source_document_id,
-  }))
+  const otherAliases = await loadAliases(
+    env,
+    'd.id',
+    `d.parent_id IS NULL AND d.source_document_id != ? AND d.source_document_id IN (SELECT id FROM document WHERE knowledge_scope_id = ?)`,
+    [triggerDocumentId, knowledgeScopeId],
+  )
 
-  const allCandidates = [...triggerCandidates, ...scopeAnchors, ...otherCandidates]
-  const components = groupCandidatesByComponent(allCandidates, isCoreferent)
+  const kb: KbEntity[] = [
+    ...scopeRows.results.map((r) => ({
+      id: `s${r.id}`,
+      type: r.entity_type,
+      label: r.label,
+      aliases: withLabel(scopeAliases.get(r.id)?.aliases, r.label),
+      contexts: scopeAliases.get(r.id)?.context ? [scopeAliases.get(r.id)!.context!] : [],
+    })),
+    ...otherRows.results.map((r) => ({
+      id: `d${r.id}`,
+      type: r.entity_type,
+      label: r.label,
+      aliases: withLabel(otherAliases.get(r.id)?.aliases, r.label),
+      contexts: otherAliases.get(r.id)?.context ? [otherAliases.get(r.id)!.context!] : [],
+    })),
+  ]
+  if (kb.length === 0) return { scopeEntitiesCreated: 0, scopeEntitiesLinked: 0, affectedDocumentIds: [], skipped: null }
 
-  // Refine each candidate component into final merge groups via LLM.
-  const refinedGroups: PromotionCandidate[][] = []
-  for (const comp of components) {
-    const groups = await refineGroupsLLM(comp, env)
-    for (const g of groups) refinedGroups.push(g)
+  const link =
+    deps.link ??
+    (async (q: LinkQuery[], k: KbEntity[]) => {
+      if (!deps.llm) return new Map(q.map((x) => [x.id, exactAliasMatch(x, k)?.id ?? null] as const))
+      const r = await linkEntities(deps.client ?? workersAiClient(env.AI), q, k, {
+        model: deps.model ?? SCOPE_PROMOTION_MODEL,
+        retrieval: 'topk',
+        k: 8,
+        autoLinkExact: true,
+      })
+      if (r.errors.length) console.warn(`[scope-promotion] document ${triggerDocumentId}: ${r.errors.join('; ')}`)
+      return r.links
+    })
+  const links = await link(queries, kb, env)
+
+  // Group trigger entities by the KB entity they link to.
+  const byTarget = new Map<string, number[]>()
+  for (const q of queries) {
+    const t = links.get(q.id)
+    if (t) byTarget.set(t, [...(byTarget.get(t) ?? []), Number(q.id)])
   }
 
+  const otherById = new Map(otherRows.results.map((r) => [r.id, r]))
+  const triggerById = new Map(triggerRows.results.map((r) => [r.id, r]))
   let created = 0
   let linked = 0
-  const affectedDocSet = new Set<number>()
-
-  for (const comp of refinedGroups) {
-    const verdict = classifyComponent(comp)
-
-    if (verdict.shouldLinkOnly && verdict.anchor) {
-      // Link every document-scope member to the existing anchor.
-      if (verdict.documentMembers.length === 0) continue
-      const ids = verdict.documentMembers.map((m) => m.id)
-      const placeholders = ids.map(() => '?').join(', ')
-      await env.DB.prepare(
-        `UPDATE extracted_entity SET parent_id = ? WHERE id IN (${placeholders})`
-      )
-        .bind(verdict.anchor.id, ...ids)
-        .run()
-      linked += 1
-      for (const m of verdict.documentMembers) {
-        if (m.sourceDocumentId !== null && m.sourceDocumentId !== triggerDocumentId) {
-          affectedDocSet.add(m.sourceDocumentId)
-        }
-      }
-    } else if (verdict.shouldCreate) {
-      // Mint a new scope entity. Use the most common label among members; tie-break by first-seen.
-      const labelCounts = new Map<string, number>()
-      for (const m of verdict.documentMembers) {
-        labelCounts.set(m.label, (labelCounts.get(m.label) ?? 0) + 1)
-      }
-      let chosenLabel = verdict.documentMembers[0].label
-      let chosenCount = -1
-      for (const [lbl, ct] of labelCounts) {
-        if (ct > chosenCount) {
-          chosenCount = ct
-          chosenLabel = lbl
-        }
-      }
-
-      const inserted = await env.DB.prepare(
-        `INSERT INTO extracted_entity
-           (source_document_id, source_chunk_id, entity_type, extracted_text,
-            label, scope, knowledge_scope_id)
-         VALUES (?, NULL, ?, NULL, ?, 'scope', ?)
-         RETURNING id`
-      )
-        .bind(
-          triggerDocumentId,
-          verdict.documentMembers[0].entityType,
-          chosenLabel,
-          knowledgeScopeId
-        )
-        .first<{ id: number }>()
-      if (!inserted) continue
-
-      const ids = verdict.documentMembers.map((m) => m.id)
-      const placeholders = ids.map(() => '?').join(', ')
-      await env.DB.prepare(
-        `UPDATE extracted_entity SET parent_id = ? WHERE id IN (${placeholders})`
-      )
-        .bind(inserted.id, ...ids)
-        .run()
-      created += 1
-      for (const m of verdict.documentMembers) {
-        if (m.sourceDocumentId !== null && m.sourceDocumentId !== triggerDocumentId) {
-          affectedDocSet.add(m.sourceDocumentId)
-        }
-      }
+  const affected = new Set<number>()
+  for (const [target, ids] of byTarget) {
+    if (target.startsWith('s')) {
+      await setParent(env, Number(target.slice(1)), ids)
+      linked++
+      continue
     }
-    // shouldCreate=false && !shouldLinkOnly → single-doc group: no-op.
+    const other = otherById.get(Number(target.slice(1)))
+    if (!other) continue
+    // Mint a scope entity; label by the most frequent label among members (first seen on ties).
+    const labels = [other.label, ...ids.map((id) => triggerById.get(id)!.label)]
+    const counts = new Map<string, number>()
+    for (const l of labels) counts.set(l, (counts.get(l) ?? 0) + 1)
+    const label = [...counts].sort((a, b) => b[1] - a[1])[0][0]
+    const inserted = await env.DB.prepare(
+      `INSERT INTO extracted_entity
+         (source_document_id, source_chunk_id, entity_type, extracted_text, label, scope, knowledge_scope_id)
+       VALUES (?, NULL, ?, NULL, ?, 'scope', ?)
+       RETURNING id`,
+    )
+      .bind(triggerDocumentId, other.entity_type, label, knowledgeScopeId)
+      .first<{ id: number }>()
+    if (!inserted) continue
+    await setParent(env, inserted.id, [other.id, ...ids])
+    created++
+    affected.add(other.source_document_id)
   }
 
-  return {
-    scopeEntitiesCreated: created,
-    scopeEntitiesLinked: linked,
-    affectedDocumentIds: [...affectedDocSet],
-    skipped: null,
-  }
+  return { scopeEntitiesCreated: created, scopeEntitiesLinked: linked, affectedDocumentIds: [...affected], skipped: null }
 }
 
 /**
