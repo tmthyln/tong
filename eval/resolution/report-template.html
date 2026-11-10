@@ -1,0 +1,227 @@
+<title>Entity Resolution Frontier</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&family=Fraunces:opsz,wght@9..144,600&display=swap">
+<style>
+/* Layout: a lab notebook — narrow reading column for findings, full-width chart plates, a dense results ledger. */
+:root {
+  --bg: #f7f8f6; --surface: #ffffff; --ink: #14161a; --ink-2: #4d525a; --ink-3: #80858d;
+  --rule: #e2e5e1; --grid: #eceeeb; --accent: #2a78d6;
+  --s-a: #2a78d6; --s-b: #eb6834; --s-c: #1baf7a; --s-legacy: #8b9099;
+  --good: #1f7a3d; --bad: #b3261e;
+  --display: "Fraunces", Georgia, serif; --sans: "IBM Plex Sans", system-ui, sans-serif; --mono: "IBM Plex Mono", ui-monospace, monospace;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #121417; --surface: #1a1c20; --ink: #eef0f2; --ink-2: #b9bec6; --ink-3: #868c95;
+  --rule: #2c3036; --grid: #24272c; --accent: #3987e5;
+  --s-a: #3987e5; --s-b: #d95926; --s-c: #199e70; --s-legacy: #7d838c; --good: #5cc27f; --bad: #f08a80; color-scheme: dark } }
+:root[data-theme="dark"] {
+  --bg: #121417; --surface: #1a1c20; --ink: #eef0f2; --ink-2: #b9bec6; --ink-3: #868c95;
+  --rule: #2c3036; --grid: #24272c; --accent: #3987e5;
+  --s-a: #3987e5; --s-b: #d95926; --s-c: #199e70; --s-legacy: #7d838c; --good: #5cc27f; --bad: #f08a80; color-scheme: dark }
+body { background: var(--bg); color: var(--ink); font: 15px/1.55 var(--sans); }
+.wrap { max-width: 1120px; margin: 0 auto; padding-block: 40px 64px; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); display: grid; gap: 36px; }
+h1 { font: 600 clamp(28px, 4vw, 40px)/1.1 var(--display); margin: 0; text-wrap: balance; letter-spacing: -0.01em; }
+h2 { font: 600 22px/1.2 var(--display); margin: 0; text-wrap: balance; }
+h3 { font: 600 13px/1.3 var(--sans); margin: 0; letter-spacing: .06em; text-transform: uppercase; color: var(--ink-2); }
+p { margin: 0; max-width: 68ch; }
+.lede { color: var(--ink-2); font-size: 16px; }
+.meta { font: 12px/1.5 var(--mono); color: var(--ink-3); }
+code, .mono { font-family: var(--mono); font-size: .92em; }
+.findings { display: grid; gap: 12px; max-width: 76ch; padding: 0; margin: 0; list-style: none; counter-reset: f; }
+.findings li { display: grid; grid-template-columns: 28px 1fr; gap: 8px; }
+.findings li::before { counter-increment: f; content: counter(f); font: 500 13px/1.6 var(--mono); color: var(--accent); }
+.controls { display: flex; flex-wrap: wrap; gap: 16px 24px; align-items: center; }
+.seg { display: inline-flex; border: 1px solid var(--rule); border-radius: 8px; overflow: hidden; background: var(--surface); }
+.seg button { font: 500 13px var(--sans); color: var(--ink-2); background: none; border: 0; padding: 6px 12px; cursor: pointer; }
+.seg button + button { border-left: 1px solid var(--rule); }
+.seg button[aria-pressed="true"] { background: var(--ink); color: var(--bg); }
+.seg button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.label { font: 500 12px var(--sans); color: var(--ink-3); letter-spacing: .04em; text-transform: uppercase; margin-right: 8px; }
+.plates { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 500px), 1fr)); gap: 20px; }
+.plate { background: var(--surface); border: 1px solid var(--rule); border-radius: 10px; padding: 18px 18px 10px; display: grid; gap: 10px; min-width: 0; position: relative; }
+.plate .sub { font-size: 13px; color: var(--ink-3); }
+.plate svg { width: 100%; height: auto; display: block; overflow: visible; }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 18px; font-size: 13px; color: var(--ink-2); }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.sw { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+.tip { position: absolute; pointer-events: none; background: var(--ink); color: var(--bg); font: 12px/1.45 var(--sans); padding: 8px 10px; border-radius: 6px; max-width: 280px; z-index: 5; }
+.tip b { font-weight: 600; } .tip .mono { opacity: .85; }
+.tablewrap { overflow-x: auto; border: 1px solid var(--rule); border-radius: 10px; background: var(--surface); }
+table { border-collapse: collapse; width: 100%; font-size: 13px; font-variant-numeric: tabular-nums; }
+th, td { padding: 7px 10px; text-align: right; white-space: nowrap; border-bottom: 1px solid var(--grid); }
+th:first-child, td:first-child, th:nth-child(2), td:nth-child(2) { text-align: left; }
+th { font: 600 12px var(--sans); color: var(--ink-2); position: sticky; top: 0; background: var(--surface); cursor: pointer; user-select: none; }
+th[aria-sort] { color: var(--ink); }
+tr.front td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
+.chip { display: inline-block; font: 500 11px var(--sans); padding: 1px 7px; border-radius: 99px; border: 1px solid var(--rule); color: var(--ink-2); }
+.chip.f { border-color: var(--accent); color: var(--accent); }
+.note { font-size: 13px; color: var(--ink-2); max-width: 80ch; }
+.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 240px), 1fr)); gap: 16px; }
+.card { background: var(--surface); border: 1px solid var(--rule); border-radius: 10px; padding: 16px; display: grid; gap: 4px; }
+.card .v { font: 600 26px/1.1 var(--sans); font-variant-numeric: tabular-nums; }
+.card .k { font-size: 13px; color: var(--ink-2); }
+.card .d { font-size: 13px; color: var(--good); }
+@media (prefers-reduced-motion: no-preference) { .pt { transition: r .12s; } }
+</style>
+
+<div class="wrap">
+  <header style="display:grid;gap:12px">
+    <div class="meta" id="stamp"></div>
+    <h1>Coreference &amp; entity resolution: cost vs quality</h1>
+    <p class="lede">Workers AI models and strategies for Tong's two resolution steps: within-document coreference (grouping a chapter's mentions into entities) and cross-document resolution against the knowledge scope. Measured on hand-labelled entity keys for six 斗罗大陆 chapters and eight 三國演義 chapters. The line traces the efficiency frontier; dashed lines are rules with no LLM.</p>
+  </header>
+
+  <section style="display:grid;gap:16px">
+    <h2>Headline</h2>
+    <div class="cards" id="cards"></div>
+    <ol class="findings" id="findings"></ol>
+  </section>
+
+  <section style="display:grid;gap:16px">
+    <h2>Frontier</h2>
+    <div class="controls">
+      <div><span class="label">Quality</span><span class="seg" id="q-seg"><button data-v="f1" aria-pressed="true">F1</button><button data-v="p" aria-pressed="false">Precision</button><button data-v="r" aria-pressed="false">Recall</button></span></div>
+      <div><span class="label">Cost</span><span class="seg" id="c-seg"><button data-v="usd" aria-pressed="true">$ / 1M chars</button><button data-v="lat" aria-pressed="false">Latency / document</button></span></div>
+    </div>
+    <div class="plates" id="plates"></div>
+    <p class="note" id="plate-note"></p>
+  </section>
+
+  <section style="display:grid;gap:12px">
+    <h2>All runs</h2>
+    <p class="note" id="table-note"></p>
+    <div class="controls"><span class="seg" id="t-seg"></span></div>
+    <div class="tablewrap"><table id="tbl"></table></div>
+  </section>
+
+  <section style="display:grid;gap:10px">
+    <h2>Method</h2>
+    <div class="note" id="method"></div>
+  </section>
+</div>
+
+<script>
+const DATA = /*DATA*/null;
+const css = v => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+const short = m => m === 'none' ? 'no LLM' : m.replace(/^@cf\/[^/]+\//, '').replace(/-instruct.*|-it$|-fp8.*|-0731|-1017/g, '');
+const fmt$ = v => v >= 10 ? v.toFixed(0) : v >= 1 ? v.toFixed(1) : v >= 0.1 ? v.toFixed(2) : v.toFixed(3);
+let Q = 'f1', C = 'usd';
+const runs = DATA.runs.map(r => ({ ...r, usd: r.cost.neurons / 1000 * 0.011 / r.chars * 1e6, lat: r.cost.wallMs / 1000 / (DATA.docs?.[r.corpus] ?? 1) }));
+const corpora = ['douluo', 'sanguo'].filter(c => runs.some(r => r.corpus === c));
+const TASKS = ['coref', 'link', 'e2e'];
+const TASK_LABEL = { coref: 'Within-document coreference', link: 'Cross-document linking', e2e: 'End to end (app pipeline)' };
+const TASK_SUB = { coref: 'MUC link score over surface forms', link: 'Link P/R/F1, gold document entities vs a KB of earlier documents', e2e: 'Pairwise cross-document F1 over named-entity forms in the final graph' };
+const CORPUS_LABEL = { douluo: '斗罗大陆, 6 chapters', sanguo: '三國演義, 8 chapters' };
+// Colour by strategy within a task (legacy always grey).
+const STRAT_VAR = { coref: { 'forms': '--s-a', 'forms-noctx': '--s-b', 'forms-per-type': '--s-c' }, link: { 'retrieve-llm-auto': '--s-a', 'kb-in-prompt': '--s-b', 'retrieve-llm': '--s-c' }, e2e: { app: '--s-a' } };
+const varOf = (t, s) => s === 'legacy' ? '--s-legacy' : (STRAT_VAR[t][s] ?? '--ink-3');
+const desc = Object.fromEntries((DATA.strategies ?? []).map(s => [s.task + '|' + s.name, s.description]));
+
+const pts = (c, t) => runs.filter(r => r.corpus === c && r.task === t).map(r => ({ r, q: r.score[Q], cost: C === 'usd' ? r.usd : r.lat }));
+function frontier(ps) { const s = ps.filter(p => p.cost > 0).sort((a, b) => a.cost - b.cost || b.q - a.q); const out = []; let best = -1; for (const p of s) if (p.q > best) { out.push(p); best = p.q; } return out; }
+
+const tip = document.createElement('div'); tip.className = 'tip'; tip.hidden = true;
+function plate(c, t) {
+  const all = pts(c, t); if (!all.length) return null;
+  const free = all.filter(p => p.cost === 0 && p.r.model === 'none'), ps = all.filter(p => p.cost > 0);
+  const el = document.createElement('div'); el.className = 'plate';
+  el.innerHTML = `<h3>${TASK_LABEL[t]} · ${CORPUS_LABEL[c] ?? c}</h3><div class="sub">${TASK_SUB[t]} · ${Q === 'f1' ? 'F1' : Q === 'p' ? 'precision' : 'recall'} vs ${C === 'usd' ? 'cost' : 'latency per document'} (log scale)</div>`;
+  const strategies = [...new Set(all.map(p => p.r.strategy))];
+  const leg = document.createElement('div'); leg.className = 'legend';
+  leg.innerHTML = strategies.map(s => free.some(p => p.r.strategy === s) ? `<span><i class="sw" style="border-radius:0;height:0;border-top:2px dashed var(--ink-3)"></i>${s}</span>` : `<span><i class="sw" style="background:var(${varOf(t, s)})"></i>${s}</span>`).join('');
+  el.appendChild(leg);
+  const W = 520, H = 320, L = 44, R = 16, T = 12, B = 40;
+  const xs = ps.map(p => p.cost); const lo = Math.min(...xs), hi = Math.max(...xs);
+  const x0 = Math.log10(lo) - 0.15, x1 = Math.log10(hi) + 0.15;
+  const qs = all.map(p => p.q);
+  const qmax = Math.min(1, Math.ceil((Math.max(...qs) + 0.03) * 10) / 10), qmin = Math.max(0, Math.floor((Math.min(...qs) - 0.05) * 10) / 10);
+  const X = v => L + (Math.log10(v) - x0) / (x1 - x0) * (W - L - R);
+  const Y = v => T + (1 - (v - qmin) / (qmax - qmin)) * (H - T - B);
+  const ns = 'http://www.w3.org/2000/svg'; const svg = document.createElementNS(ns, 'svg');
+  svg.setAttribute('viewBox', `0 0 ${W} ${H}`); svg.setAttribute('role', 'img');
+  const add = (tag, attrs, parent = svg) => { const e = document.createElementNS(ns, tag); for (const k in attrs) e.setAttribute(k, attrs[k]); parent.appendChild(e); return e; };
+  const mono = 'IBM Plex Mono, monospace';
+  for (let i = 0; i <= 5; i++) { const v = qmin + (qmax - qmin) * i / 5, y = Y(v);
+    add('line', { x1: L, x2: W - R, y1: y, y2: y, stroke: css('--grid'), 'stroke-width': 1 });
+    add('text', { x: L - 8, y: y + 4, 'text-anchor': 'end', 'font-size': 11, fill: css('--ink-3'), 'font-family': mono }).textContent = v.toFixed(2); }
+  const ticks = []; for (let e = Math.floor(x0); e <= Math.ceil(x1); e++) for (const m of [1, 2, 5]) { const v = m * 10 ** e; if (Math.log10(v) >= x0 && Math.log10(v) <= x1) ticks.push(v); }
+  for (const v of ticks) { const x = X(v);
+    add('line', { x1: x, x2: x, y1: T, y2: H - B, stroke: css('--grid'), 'stroke-width': 1 });
+    add('text', { x, y: H - B + 16, 'text-anchor': 'middle', 'font-size': 11, fill: css('--ink-3'), 'font-family': mono }).textContent = C === 'usd' ? '$' + (v < 1 ? +v.toPrecision(1) : v.toFixed(0)) : (v < 1 ? +v.toPrecision(1) : v) + 's'; }
+  add('text', { x: (L + W - R) / 2, y: H - 6, 'text-anchor': 'middle', 'font-size': 12, fill: css('--ink-2') }).textContent = C === 'usd' ? 'USD per 1M characters of source text' : 'seconds per document';
+  const boxes = ps.map(p => ({ x0: X(p.cost) - 6, x1: X(p.cost) + 6, y0: Y(p.q) - 6, y1: Y(p.q) + 6 }));
+  // no-LLM rules as dashed reference lines
+  for (const p of free) { const y = Y(p.q);
+    add('line', { x1: L, x2: W - R, y1: y, y2: y, stroke: css('--ink-3'), 'stroke-width': 1.5, 'stroke-dasharray': '5 4' });
+    const below = y - 16 < T; const ty = below ? y + 14 : y - 5;
+    add('text', { x: W - R - 2, y: ty, 'text-anchor': 'end', 'font-size': 11, fill: css('--ink-2') }).textContent = `${p.r.strategy} (no LLM) ${p.q.toFixed(3)}`;
+    boxes.push({ x0: W - R - 200, x1: W - R, y0: ty - 11, y1: ty + 3 }); }
+  const fr = frontier(ps); let d = '';
+  fr.forEach((p, i) => { const x = X(p.cost), y = Y(p.q); d += i === 0 ? `M${x},${y}` : `H${x}V${y}`; });
+  if (fr.length) d += `H${W - R}`;
+  add('path', { d, fill: 'none', stroke: css('--ink-2'), 'stroke-width': 2, 'stroke-linejoin': 'round', opacity: .55 });
+  const frSet = new Set(fr);
+  for (const p of [...ps].sort((a, b) => frSet.has(a) - frSet.has(b))) {
+    const x = X(p.cost), y = Y(p.q);
+    add('circle', { cx: x, cy: y, r: frSet.has(p) ? 6 : 5, fill: css(varOf(t, p.r.strategy)), stroke: css('--surface'), 'stroke-width': 2, class: 'pt' });
+    const hit = add('circle', { cx: x, cy: y, r: 12, fill: 'transparent', tabindex: 0 });
+    const show = () => { const s = p.r.score;
+      tip.innerHTML = `<b>${short(p.r.model)}</b><br>${p.r.strategy}<br><span class="mono">F1 ${s.f1.toFixed(3)} · P ${s.p.toFixed(3)} · R ${s.r.toFixed(3)}<br>$${fmt$(p.r.usd)}/1M chars · ${p.r.lat.toFixed(1)}s/doc · ${p.r.cost.calls} calls${p.r.cost.errors + p.r.cost.truncated ? ` · ${p.r.cost.errors + p.r.cost.truncated} failed` : ''}</span>`;
+      tip.hidden = false; el.appendChild(tip);
+      const bx = svg.getBoundingClientRect(), pb = el.getBoundingClientRect(), sc = bx.width / W;
+      let left = bx.left - pb.left + x * sc + 12; if (left + 280 > pb.width) left = bx.left - pb.left + x * sc - 292;
+      tip.style.left = Math.max(4, left) + 'px'; tip.style.top = (bx.top - pb.top + y * sc - 10) + 'px'; };
+    hit.addEventListener('mouseenter', show); hit.addEventListener('focus', show);
+    hit.addEventListener('mouseleave', () => tip.hidden = true); hit.addEventListener('blur', () => tip.hidden = true);
+  }
+  const hits = b => boxes.some(o => b.x0 < o.x1 && b.x1 > o.x0 && b.y0 < o.y1 && b.y1 > o.y0);
+  const PICK = DATA.production ?? {};
+  const isPick = p => PICK[t] && p.r.strategy === PICK[t].strategy && p.r.model === PICK[t].model;
+  const toLabel = [...ps.filter(isPick), ...fr.filter(p => !isPick(p)), ...ps.filter(p => p.r.strategy === 'legacy')];
+  for (const p of toLabel) {
+    const x = X(p.cost), y = Y(p.q); const text = short(p.r.model) + (p.r.strategy === 'legacy' ? ' · legacy' : isPick(p) ? ' · production' : '');
+    const w = text.length * 6.1 + 4, h = 13;
+    const cands = [[x + 9, y - 16], [x + 9, y + 4], [x - 9 - w, y - 16], [x - 9 - w, y + 4]];
+    for (const dy of [30, 46, 62, 78, 94, 110, 126]) cands.push([x + 14, y + dy], [x + 14, y - dy - h], [x - 14 - w, y + dy], [x - 14 - w, y - dy - h]);
+    // The production pick is always labelled: if no free spot, take the first in-bounds one.
+    const inBounds = ([lx, ly]) => lx >= L && lx + w <= W - 2 && ly >= 0 && ly + h <= H - B;
+    const order = isPick(p) ? [...cands.filter(c => inBounds(c) && !hits({ x0: c[0], x1: c[0] + w, y0: c[1], y1: c[1] + h })), cands.find(inBounds)].filter(Boolean) : cands;
+    for (const [lx, ly] of order) { const box = { x0: lx, x1: lx + w, y0: ly, y1: ly + h };
+      if (!isPick(p) && (!inBounds([lx, ly]) || hits(box))) continue;
+      boxes.push(box);
+      if (Math.abs(ly + h / 2 - y) > 20) add('line', { x1: x, y1: y, x2: lx < x ? lx + w : lx, y2: ly + h / 2, stroke: css('--ink-3'), 'stroke-width': 1 });
+      add('text', { x: lx, y: ly + 10, 'font-size': 11, fill: css('--ink'), 'font-family': 'IBM Plex Sans, sans-serif' }).textContent = text; break; }
+  }
+  el.appendChild(svg); return el;
+}
+function renderPlates() { const host = document.getElementById('plates'); host.innerHTML = ''; for (const t of TASKS) for (const c of corpora) { const p = plate(c, t); if (p) host.appendChild(p); } }
+
+let TAB = null, sortKey = 'f1', sortDir = -1;
+function renderTable() {
+  const seg = document.getElementById('t-seg');
+  const tabs = TASKS.flatMap(t => corpora.map(c => [c, t])).filter(([c, t]) => runs.some(r => r.corpus === c && r.task === t));
+  if (!seg.childElementCount) { tabs.forEach(([c, t], i) => { const b = document.createElement('button'); b.textContent = `${c} · ${t}`; b.dataset.v = c + '|' + t; b.setAttribute('aria-pressed', i === 0); seg.appendChild(b); });
+    seg.addEventListener('click', e => { const b = e.target.closest('button'); if (!b) return; seg.querySelectorAll('button').forEach(x => x.setAttribute('aria-pressed', x === b)); TAB = b.dataset.v; renderTable(); }); TAB = tabs[0].join('|'); }
+  const [c, t] = TAB.split('|');
+  const ps = pts(c, t); const fr = new Set(frontier(ps).map(p => p.r));
+  const extra = t === 'coref' ? ['b3', 'B³ F1', r => r.score.b3.f1] : t === 'link' ? ['nil', 'NIL acc.', r => r.score.nilAccuracy] : ['all', 'All-forms F1', r => r.score.all?.f1 ?? NaN];
+  const rows = ps.map(p => ({ r: p.r, model: short(p.r.model), strategy: p.r.strategy, f1: p.r.score.f1, p: p.r.score.p, r_: p.r.score.r, x: extra[2](p.r), usd: p.r.usd, lat: p.r.lat, calls: p.r.cost.calls, err: p.r.cost.errors + p.r.cost.truncated }));
+  const cols = [['model', 'Model'], ['strategy', 'Strategy'], ['f1', 'F1'], ['p', 'P'], ['r_', 'R'], ['x', extra[1]], ['usd', '$ / 1M chars'], ['lat', 's / doc'], ['calls', 'Calls'], ['err', 'Failed calls']];
+  rows.sort((a, b) => (a[sortKey] > b[sortKey] ? 1 : a[sortKey] < b[sortKey] ? -1 : 0) * sortDir);
+  const tbl = document.getElementById('tbl');
+  tbl.innerHTML = `<thead><tr>${cols.map(([k, l]) => `<th data-k="${k}" ${k === sortKey ? `aria-sort="${sortDir > 0 ? 'ascending' : 'descending'}"` : ''}>${l}${k === sortKey ? (sortDir > 0 ? ' ↑' : ' ↓') : ''}</th>`).join('')}</tr></thead><tbody>${rows.map(r => `<tr class="${fr.has(r.r) ? 'front' : ''}"><td>${r.model}</td><td><span class="chip ${fr.has(r.r) ? 'f' : ''}" title="${(desc[t + '|' + r.strategy] ?? '').replace(/"/g, '&quot;')}">${r.strategy}</span></td><td>${r.f1.toFixed(3)}</td><td>${r.p.toFixed(3)}</td><td>${r.r_.toFixed(3)}</td><td>${isNaN(r.x) ? '–' : r.x.toFixed(3)}</td><td>${fmt$(r.usd)}</td><td>${r.lat.toFixed(1)}</td><td>${r.calls}</td><td>${r.err}</td></tr>`).join('')}</tbody>`;
+  tbl.querySelectorAll('th').forEach(th => th.addEventListener('click', () => { const k = th.dataset.k; sortDir = k === sortKey ? -sortDir : (['model', 'strategy', 'usd', 'lat', 'calls', 'err'].includes(k) ? 1 : -1); sortKey = k; renderTable(); }));
+}
+function seg(id, set) { const s = document.getElementById(id); s.addEventListener('click', e => { const b = e.target.closest('button'); if (!b) return; s.querySelectorAll('button').forEach(x => x.setAttribute('aria-pressed', x === b)); set(b.dataset.v); renderPlates(); renderTable(); }); }
+seg('q-seg', v => Q = v); seg('c-seg', v => C = v);
+document.getElementById('stamp').textContent = `Generated ${DATA.generatedAt} · ${runs.length} runs · ${corpora.length} corpora`;
+document.getElementById('cards').innerHTML = (DATA.cards ?? []).map(c => `<div class="card"><div class="k">${c.k}</div><div class="v">${c.v}</div><div class="d">${c.d ?? ''}</div></div>`).join('');
+document.getElementById('findings').innerHTML = (DATA.findings ?? []).map(f => `<li><span>${f}</span></li>`).join('');
+document.getElementById('method').innerHTML = DATA.method ?? '';
+document.getElementById('plate-note').textContent = DATA.plateNote ?? '';
+document.getElementById('table-note').textContent = DATA.tableNote ?? '';
+renderPlates(); renderTable();
+window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', renderPlates);
+new MutationObserver(renderPlates).observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
+</script>

@@ -55,3 +55,5 @@ container/__pycache__/
 # Extraction eval: datasets (third-party / copyrighted text) and run outputs stay local
 eval/extraction/data/
 eval/extraction/results/
+eval/resolution/data/
+eval/resolution/results/
