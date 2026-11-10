@@ -1,3 +1,17 @@
+/**
+ * App-facing entity extraction: maps the configurable node-type taxonomy onto
+ * the generic schema-driven extractor in ./extraction.
+ *
+ * One LLM call extracts every node type at once (the old pipeline made one
+ * call per node type plus an LLM dedupe call). Each string gets exactly one
+ * type in the response, so type conflicts are resolved by the model in the
+ * same call; residual span overlaps use deterministic longest-span rules.
+ */
+import { extractJsonObject } from './llm-utils'
+import { extract, type ExtractionRun } from './extraction/extract'
+import { workersAiClient, type LlmClient } from './extraction/llm'
+import type { ExtractionSchema } from './extraction/schema'
+
 export interface NodeTypeInput {
   name: string
   definition: string
@@ -11,18 +25,23 @@ export interface ExtractedEntity {
   endIndex: number
 }
 
-import { extractJsonObject } from './llm-utils'
+/** Selected from the local efficiency-frontier eval (eval/extraction, see README). */
+export const ENTITY_EXTRACTION_MODEL = '@cf/google/gemma-4-26b-a4b-it' as keyof AiModels
+const MODEL = ENTITY_EXTRACTION_MODEL as string
 
-export const ENTITY_EXTRACTION_MODEL = '@cf/moonshotai/kimi-k2.6' as keyof AiModels
-const MODEL = ENTITY_EXTRACTION_MODEL
-interface ChatCompletionResponse {
-  choices?: Array<{ message?: { content?: string }; finish_reason?: string }>
-  usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number }
-}
+/**
+ * Consecutive chunks per entity-extraction call (see extractEntitiesBatch).
+ * Batching amortizes the node-type prompt; in the eval it cut cost ~3× for a
+ * small F1 change.
+ */
+export const ENTITY_BATCH_CHUNKS = 4
 
 export interface ExtractOptions {
   thinking?: boolean
   maxCompletionTokens?: number
+  model?: string
+  /** Inject a client (tests, local scripts). Defaults to the env.AI binding. */
+  client?: LlmClient
 }
 
 export interface NodeTypeExtractionRun {
@@ -34,93 +53,83 @@ export interface NodeTypeExtractionRun {
   rawContent: string | null
 }
 
+export function nodeTypesToSchema(nodeTypes: NodeTypeInput[]): ExtractionSchema {
+  return {
+    entities: nodeTypes.map((t) => ({ name: t.name, description: t.definition, examples: t.examples })),
+    instructions: 'The text is Chinese (Mandarin) prose.',
+  }
+}
+
+const clientFor = (env: Env, opts: ExtractOptions) => opts.client ?? workersAiClient(env.AI)
+
+function toEntities(run: Pick<ExtractionRun, 'spans'>, text: string, offset = 0): ExtractedEntity[] {
+  return run.spans
+    .filter((s) => s.start >= offset && s.end <= offset + text.length)
+    .map((s) => ({ nodeType: s.label, text: s.text, startIndex: s.start - offset, endIndex: s.end - offset }))
+}
+
+/** One extraction call over all `nodeTypes` with full usage metadata. */
+export async function extractEntitiesRun(
+  chunkContent: string,
+  nodeTypes: NodeTypeInput[],
+  env: Env,
+  opts: ExtractOptions = {},
+): Promise<ExtractionRun> {
+  return extract(clientFor(env, opts), chunkContent, nodeTypesToSchema(nodeTypes), {
+    model: opts.model ?? MODEL,
+    thinking: opts.thinking ?? false,
+    maxCompletionTokens: opts.maxCompletionTokens,
+    // Callers decide overlap policy (removeOverlaps / deduplicateEntitiesLLM).
+    keepOverlaps: true,
+  })
+}
+
 /**
- * Extract entities for a subset of node types from a chunk of text.
- * Each node type is processed independently in a separate LLM call.
- * Does NOT apply overlap removal — callers should apply removeOverlaps if needed.
+ * Extract entities of all given node types from a chunk in a single LLM call.
+ * Returns every occurrence of each extracted string. Does NOT apply overlap
+ * removal — callers should apply removeOverlaps if needed. Throws if the model
+ * call failed, so durable workflow steps can retry.
  */
 export async function extractEntitiesForNodeTypes(
   chunkContent: string,
   nodeTypes: NodeTypeInput[],
   env: Env,
-  opts: ExtractOptions = {}
+  opts: ExtractOptions = {},
 ): Promise<ExtractedEntity[]> {
-  const runs = await extractEntitiesForNodeTypesWithUsage(chunkContent, nodeTypes, env, opts)
-  return runs.flatMap(r => r.entities)
+  if (nodeTypes.length === 0) return []
+  const run = await extractEntitiesRun(chunkContent, nodeTypes, env, opts)
+  if (run.error) throw new Error(`entity extraction failed: ${run.error}`)
+  return toEntities(run, chunkContent)
 }
 
 /**
- * Same as extractEntitiesForNodeTypes but returns per-node-type usage, latency, and
- * raw content so evaluation tooling can compare modes.
+ * Per-node-type runs with usage/latency/raw content, for the dev-eval tooling
+ * that compares modes per type. (Production uses the single-call path.)
  */
-async function runAiWithRetry(
-  env: Env,
-  args: Record<string, unknown>,
-  attempts = 3,
-): Promise<ChatCompletionResponse> {
-  let lastErr: unknown
-  for (let i = 0; i < attempts; i++) {
-    try {
-      return await (env.AI.run as (model: string, args: Record<string, unknown>) => Promise<unknown>)(MODEL, args) as ChatCompletionResponse
-    } catch (err) {
-      lastErr = err
-      if (i < attempts - 1) {
-        await new Promise(r => setTimeout(r, 1000 * Math.pow(2, i)))
-      }
-    }
-  }
-  throw lastErr
-}
-
 export async function extractEntitiesForNodeTypesWithUsage(
   chunkContent: string,
   nodeTypes: NodeTypeInput[],
   env: Env,
-  opts: ExtractOptions = {}
+  opts: ExtractOptions = {},
 ): Promise<NodeTypeExtractionRun[]> {
-  const thinking = opts.thinking ?? false
-  const maxCompletionTokens = opts.maxCompletionTokens ?? 1024
-
-  return Promise.all(nodeTypes.map(async (nodeType): Promise<NodeTypeExtractionRun> => {
-    const messages = buildMessages(chunkContent, nodeType)
-    const start = Date.now()
-    let result: ChatCompletionResponse
-    try {
-      result = await runAiWithRetry(env, {
-        messages,
-        temperature: 0,
-        max_completion_tokens: maxCompletionTokens,
-        response_format: { type: 'json_object' },
-        chat_template_kwargs: { thinking },
-      })
-    } catch (err) {
-      const latencyMs = Date.now() - start
-      console.warn(`[entity-extraction] AI.run failed for ${nodeType.name} after retries:`, err)
+  return Promise.all(
+    nodeTypes.map(async (nodeType): Promise<NodeTypeExtractionRun> => {
+      const run = await extractEntitiesRun(chunkContent, [nodeType], env, opts)
+      if (run.error) console.warn(`[entity-extraction] AI.run failed for ${nodeType.name}:`, run.error)
       return {
         nodeType: nodeType.name,
-        entities: [],
-        usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
-        finishReason: 'error',
-        latencyMs,
-        rawContent: null,
+        entities: toEntities(run, chunkContent),
+        usage: {
+          promptTokens: run.usage.promptTokens,
+          completionTokens: run.usage.completionTokens,
+          totalTokens: run.usage.promptTokens + run.usage.completionTokens,
+        },
+        finishReason: run.finishReason,
+        latencyMs: run.latencyMs,
+        rawContent: run.rawContent,
       }
-    }
-    const latencyMs = Date.now() - start
-    const entities = parseResponse(result, chunkContent, nodeType.name)
-    const choice = result.choices?.[0]
-    return {
-      nodeType: nodeType.name,
-      entities,
-      usage: {
-        promptTokens: result.usage?.prompt_tokens ?? 0,
-        completionTokens: result.usage?.completion_tokens ?? 0,
-        totalTokens: result.usage?.total_tokens ?? 0,
-      },
-      finishReason: choice?.finish_reason ?? null,
-      latencyMs,
-      rawContent: choice?.message?.content ?? null,
-    }
-  }))
+    }),
+  )
 }
 
 /**
@@ -130,118 +139,56 @@ export async function extractEntitiesForNodeTypesWithUsage(
 export async function extractEntities(
   chunkContent: string,
   nodeTypes: NodeTypeInput[],
-  env: Env
+  env: Env,
+  opts: ExtractOptions = {},
 ): Promise<ExtractedEntity[]> {
-  console.log(`[entity-extraction] Starting extraction for ${nodeTypes.length} types, chunk length: ${chunkContent.length}`)
-  const allEntities = await extractEntitiesForNodeTypes(chunkContent, nodeTypes, env)
-  const deduped = removeOverlaps(allEntities)
-  console.log(`[entity-extraction] Total: ${deduped.length} entities (${allEntities.length} before overlap removal)`)
-  return deduped
+  const run = await extractEntitiesRun(chunkContent, nodeTypes, env, opts)
+  if (run.error) console.warn('[entity-extraction] AI.run failed:', run.error)
+  return removeOverlaps(toEntities(run, chunkContent))
 }
 
-function buildMessages(chunkContent: string, nodeType: NodeTypeInput) {
-  const examplesBlock =
-    nodeType.examples.length > 0
-      ? `Examples of ${nodeType.name} entities: ${nodeType.examples.join(', ')}`
-      : ''
-
-  const systemPrompt = `You are an entity extraction system. You extract named entities from Chinese text.
-
-You are extracting entities of type: ${nodeType.name}
-Definition: ${nodeType.definition}
-${examplesBlock}
-
-Return a JSON object with an "entities" array. Each entity should have:
-- "text": the exact text as it appears in the input (do not modify or translate it)
-
-If no entities of this type are found, return: {"entities": []}
-
-Example response format: {"entities": [{"text": "北京"}, {"text": "上海"}]}`
-
-  return [
-    { role: 'system' as const, content: systemPrompt },
-    { role: 'user' as const, content: chunkContent },
-  ]
-}
-
-function parseResponse(
-  result: ChatCompletionResponse,
-  chunkContent: string,
-  nodeTypeName: string
-): ExtractedEntity[] {
-  const content = result.choices?.[0]?.message?.content
-  if (typeof content !== 'string') {
-    console.warn(`[entity-extraction] No content in response for ${nodeTypeName}, result:`, JSON.stringify(result))
-    return []
-  }
-
-  let parsed: { entities?: Array<{ text: string }> } | Array<{ text: string }> | null = null
-  try {
-    parsed = JSON.parse(extractJsonObject(content))
-  } catch (err) {
-    console.warn(`[entity-extraction] JSON parse failed for ${nodeTypeName}:`, err)
-    console.warn(`[entity-extraction] Raw content: ${content}`)
-    return []
-  }
-
-  if (!parsed) {
-    console.warn(`[entity-extraction] Null parsed result for ${nodeTypeName}`)
-    return []
-  }
-
-  // Extract entities array from response
-  let items: Array<{ text: string }>
-  if (Array.isArray(parsed)) {
-    items = parsed
-  } else if (parsed.entities && Array.isArray(parsed.entities)) {
-    items = parsed.entities
-  } else {
-    console.warn(`[entity-extraction] Unexpected response structure for ${nodeTypeName}:`, JSON.stringify(parsed))
-    return []
-  }
-
-  const entities: ExtractedEntity[] = []
-
-  for (const item of items) {
-    if (!item.text || typeof item.text !== 'string') continue
-
-    // Find all occurrences of this entity text in the chunk
-    let searchFrom = 0
-    while (true) {
-      const idx = chunkContent.indexOf(item.text, searchFrom)
-      if (idx === -1) break
-
-      entities.push({
-        nodeType: nodeTypeName,
-        text: item.text,
-        startIndex: idx,
-        endIndex: idx + item.text.length,
-      })
-
-      searchFrom = idx + item.text.length
-    }
-  }
-
-  return entities
+/**
+ * Extract entities for several chunks with ONE call over their concatenation,
+ * then split the spans back per chunk. Amortizes the (large, static) schema
+ * prompt across chunks. Throws on model failure.
+ */
+export async function extractEntitiesBatch(
+  chunks: string[],
+  nodeTypes: NodeTypeInput[],
+  env: Env,
+  opts: ExtractOptions = {},
+): Promise<ExtractedEntity[][]> {
+  if (nodeTypes.length === 0 || chunks.length === 0) return chunks.map(() => [])
+  const SEP = '\n\n'
+  const joined = chunks.join(SEP)
+  const run = await extractEntitiesRun(joined, nodeTypes, env, opts)
+  if (run.error) throw new Error(`entity extraction failed: ${run.error}`)
+  let offset = 0
+  return chunks.map((chunk) => {
+    const ents = toEntities(run, chunk, offset)
+    offset += chunk.length + SEP.length
+    return ents
+  })
 }
 
 /**
  * Use an LLM to resolve entity type conflicts (overlapping spans tagged with multiple types).
  * If no conflicts exist, returns entities as-is without making an LLM call.
  * Falls back to longest-span rule for any conflict the LLM fails to resolve.
+ *
+ * No longer needed after single-call extraction (the model assigns one type
+ * per string); kept for callers that merge results from several extractors.
  */
 export async function deduplicateEntitiesLLM(
   chunkContent: string,
   entities: ExtractedEntity[],
-  env: Env
+  env: Env,
 ): Promise<ExtractedEntity[]> {
-  // Find conflict groups: entities whose spans overlap with entities of a different type
   const sorted = [...entities].sort((a, b) => {
     if (a.startIndex !== b.startIndex) return a.startIndex - b.startIndex
-    return (b.endIndex - b.startIndex) - (a.endIndex - a.startIndex)
+    return b.endIndex - b.startIndex - (a.endIndex - a.startIndex)
   })
 
-  // Group overlapping entities together
   const conflictGroups: ExtractedEntity[][] = []
   const nonConflicting: ExtractedEntity[] = []
 
@@ -262,93 +209,61 @@ export async function deduplicateEntitiesLLM(
     }
   }
 
-  if (conflictGroups.length === 0) {
-    return entities
-  }
+  if (conflictGroups.length === 0) return entities
 
-  // Build LLM prompt for all conflict groups
   const conflictDescriptions = conflictGroups.map((group, idx) => {
-    const span = chunkContent.slice(group[0].startIndex, Math.max(...group.map(e => e.endIndex)))
-    const candidates = group.map(e => e.nodeType).join(', ')
-    return `${idx + 1}. "${span}" spans [${group[0].startIndex},${Math.max(...group.map(e => e.endIndex))}]: candidates: [${candidates}]`
+    const end = Math.max(...group.map((e) => e.endIndex))
+    const span = chunkContent.slice(group[0].startIndex, end)
+    const candidates = group.map((e) => e.nodeType).join(', ')
+    return `${idx + 1}. "${span}" spans [${group[0].startIndex},${end}]: candidates: [${candidates}]`
   })
-
-  const systemPrompt = `You resolve entity type conflicts in Chinese text extraction.
-Return JSON: { "resolutions": [{ "text": "...", "nodeType": "..." }] }`
-
-  const userPrompt = `Text: "${chunkContent}"
-
-Resolve these conflicts (each group has overlapping spans — pick exactly one):
-${conflictDescriptions.join('\n')}
-
-Reply with JSON { "resolutions": [ { "text": "<exact text>", "nodeType": "<chosen type>" } ] }`
 
   let resolved: Array<{ text: string; nodeType: string }> = []
   try {
-    const result = await env.AI.run(MODEL, {
+    const result = await workersAiClient(env.AI, { attempts: 1 }).chat({
+      model: MODEL,
       messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: userPrompt },
+        {
+          role: 'system',
+          content: `You resolve entity type conflicts in Chinese text extraction.\nReturn JSON: { "resolutions": [{ "text": "...", "nodeType": "..." }] }`,
+        },
+        {
+          role: 'user',
+          content: `Text: "${chunkContent}"\n\nResolve these conflicts (each group has overlapping spans — pick exactly one):\n${conflictDescriptions.join('\n')}\n\nReply with JSON { "resolutions": [ { "text": "<exact text>", "nodeType": "<chosen type>" } ] }`,
+        },
       ],
-      temperature: 0,
-      max_completion_tokens: 1024,
-      response_format: { type: 'json_object' },
-      chat_template_kwargs: { thinking: false },
-    }) as ChatCompletionResponse
-
-    const content = result.choices?.[0]?.message?.content
-    if (typeof content === 'string') {
-      const parsed = JSON.parse(extractJsonObject(content)) as { resolutions?: Array<{ text: string; nodeType: string }> } | null
-      if (parsed?.resolutions && Array.isArray(parsed.resolutions)) {
-        resolved = parsed.resolutions
-      }
+    })
+    if (typeof result.content === 'string') {
+      const parsed = JSON.parse(extractJsonObject(result.content)) as { resolutions?: Array<{ text: string; nodeType: string }> } | null
+      if (parsed?.resolutions && Array.isArray(parsed.resolutions)) resolved = parsed.resolutions
     }
   } catch (err) {
     console.warn('[entity-extraction] deduplicateEntitiesLLM LLM call failed, falling back to longest-span:', err)
-    // Non-fatal: fall back to longest-span for all conflict groups
   }
 
-  // Resolve each conflict group
   const resolvedEntities: ExtractedEntity[] = [...nonConflicting]
-
   for (const group of conflictGroups) {
-    const groupText = chunkContent.slice(group[0].startIndex, Math.max(...group.map(e => e.endIndex)))
+    const groupText = chunkContent.slice(group[0].startIndex, Math.max(...group.map((e) => e.endIndex)))
     const llmResolution = resolved.find((r) => r.text === groupText)
-
-    if (llmResolution) {
-      // Find the entity in the group matching the chosen type
-      const chosen = group.find((e) => e.nodeType === llmResolution.nodeType) ?? group[0]
-      resolvedEntities.push(chosen)
-    } else {
-      // Fallback: longest span (first in sorted order since we sorted longest-first)
-      resolvedEntities.push(group[0])
-    }
+    const chosen = llmResolution ? (group.find((e) => e.nodeType === llmResolution.nodeType) ?? group[0]) : group[0]
+    resolvedEntities.push(chosen)
   }
-
   return resolvedEntities.sort((a, b) => a.startIndex - b.startIndex)
 }
 
 /**
- * Remove overlapping entities from a sorted list, preferring longer spans.
- * When two entities overlap, the longer one is kept.
- * If equal length, the one encountered first is kept.
+ * Remove overlapping entities, preferring longer spans (longest-first greedy).
  */
 export function removeOverlaps(entities: ExtractedEntity[]): ExtractedEntity[] {
-  // Sort by startIndex, then by longer span first
-  const sorted = [...entities].sort((a, b) => {
-    if (a.startIndex !== b.startIndex) return a.startIndex - b.startIndex
-    return (b.endIndex - b.startIndex) - (a.endIndex - a.startIndex)
-  })
-
-  const result: ExtractedEntity[] = []
-  let lastEnd = -1
-
-  for (const entity of sorted) {
-    if (entity.startIndex >= lastEnd) {
-      result.push(entity)
-      lastEnd = entity.endIndex
-    }
+  const byLength = entities
+    .map((e, i) => ({ e, i }))
+    .sort(
+      (a, b) =>
+        b.e.endIndex - b.e.startIndex - (a.e.endIndex - a.e.startIndex) || a.e.startIndex - b.e.startIndex || a.i - b.i,
+    )
+  const kept: ExtractedEntity[] = []
+  for (const { e } of byLength) {
+    if (kept.every((k) => e.endIndex <= k.startIndex || e.startIndex >= k.endIndex)) kept.push(e)
   }
-
-  return result
+  return kept.sort((a, b) => a.startIndex - b.startIndex)
 }

@@ -6,7 +6,8 @@
 // run it in the background via waitUntil.
 
 import { resolveDocumentCoreference } from '../coreference'
-import { extractRelationshipsForEdgeType, type EdgeTypeInput } from '../relationship-extraction'
+import { extractRelationships, type EdgeTypeInput } from '../relationship-extraction'
+import { anchorRelations } from '../relationship-anchoring'
 
 export interface CreateEntityParams {
   text: string
@@ -190,11 +191,19 @@ async function extractAndPersistChunkRelationships(
       .first<{ window_content: string }>(),
     env.DB
       .prepare(
-        `SELECT id, entity_type, extracted_text FROM extracted_entity
-         WHERE source_chunk_id IN (${ph}) AND scope = 'chunk' AND extracted_text IS NOT NULL`,
+        `SELECT ee.id, ee.entity_type, ee.extracted_text, ee.source_chunk_id, ee.chunk_start_index, tc.chunk_order
+         FROM extracted_entity ee JOIN text_chunk tc ON tc.id = ee.source_chunk_id
+         WHERE ee.source_chunk_id IN (${ph}) AND ee.scope = 'chunk' AND ee.extracted_text IS NOT NULL`,
       )
       .bind(...windowChunkIds)
-      .all<{ id: number; entity_type: string; extracted_text: string }>(),
+      .all<{
+        id: number
+        entity_type: string
+        extracted_text: string
+        source_chunk_id: number
+        chunk_start_index: number | null
+        chunk_order: number
+      }>(),
     env.DB
       .prepare(
         'SELECT name, reverse_name, definition, examples_json FROM edge_type WHERE is_current = 1 ORDER BY name',
@@ -222,20 +231,10 @@ async function extractAndPersistChunkRelationships(
 
   if (edgeTypes.length === 0 || entities.length < 2) return
 
-  const allRels: Array<{ fromText: string; toText: string; edgeType: string; explanation: string }> = []
-  for (const edgeType of edgeTypes) {
-    const rels = await extractRelationshipsForEdgeType(windowContent, entities, edgeType, env)
-    allRels.push(...rels)
-  }
+  // One call for all edge types (was one call per edge type).
+  const allRels = await extractRelationships(windowContent, entities, edgeTypes, env)
 
   if (allRels.length === 0) return
-
-  const textToIds = new Map<string, number[]>()
-  for (const e of entityRows.results) {
-    const arr = textToIds.get(e.extracted_text)
-    if (arr) arr.push(e.id)
-    else textToIds.set(e.extracted_text, [e.id])
-  }
 
   const existingRows = await env.DB
     .prepare(
@@ -252,18 +251,19 @@ async function extractAndPersistChunkRelationships(
   const toInsert: Array<{ fromId: number; toId: number; edgeType: string; explanation: string }> = []
   const seen = new Set<string>()
 
-  for (const rel of allRels) {
-    const fromIds = textToIds.get(rel.fromText) ?? []
-    const toIds = textToIds.get(rel.toText) ?? []
-    for (const fromId of fromIds) {
-      for (const toId of toIds) {
-        if (fromId === toId) continue
-        const key = `${fromId}|${toId}|${rel.edgeType}`
-        if (existingKeys.has(key) || seen.has(key)) continue
-        seen.add(key)
-        toInsert.push({ fromId, toId, edgeType: rel.edgeType, explanation: rel.explanation })
-      }
-    }
+  // One anchored row per co-occurring chunk — not every mention pair.
+  const mentions = entityRows.results.map((e) => ({
+    id: e.id,
+    text: e.extracted_text,
+    chunkId: e.source_chunk_id,
+    chunkOrder: e.chunk_order,
+    startIndex: e.chunk_start_index ?? 0,
+  }))
+  for (const rel of anchorRelations(allRels, mentions)) {
+    const key = `${rel.fromEntityId}|${rel.toEntityId}|${rel.edgeType}`
+    if (existingKeys.has(key) || seen.has(key)) continue
+    seen.add(key)
+    toInsert.push({ fromId: rel.fromEntityId, toId: rel.toEntityId, edgeType: rel.edgeType, explanation: rel.explanation })
   }
 
   if (toInsert.length > 0) {

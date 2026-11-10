@@ -2,6 +2,7 @@ import { Hono } from 'hono'
 import {
   extractEntitiesForNodeTypesWithUsage,
   removeOverlaps,
+  ENTITY_EXTRACTION_MODEL,
   type NodeTypeInput,
   type NodeTypeExtractionRun,
 } from '../lib/entity-extraction'
@@ -101,7 +102,7 @@ devEvalRoutes.post('/entity-extraction/init', async (c) => {
   }))
 
   return c.json({
-    model: '@cf/moonshotai/kimi-k2.6',
+    model: ENTITY_EXTRACTION_MODEL,
     chunks,
     nodeTypes,
   })

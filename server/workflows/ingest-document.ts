@@ -10,15 +10,20 @@ import {
   translateChunkRevision,
 } from '../lib/translation'
 import {
-  extractEntitiesForNodeTypes,
-  deduplicateEntitiesLLM,
+  extractEntitiesBatch,
+  removeOverlaps,
+  ENTITY_BATCH_CHUNKS,
   ENTITY_EXTRACTION_MODEL,
 } from '../lib/entity-extraction'
 import type { NodeTypeInput, ExtractedEntity } from '../lib/entity-extraction'
 import {
-  extractRelationshipsForEdgeType,
+  extractRelationships,
+  relationWindows,
+  RELATION_WINDOW_CHUNKS,
+  RELATION_WINDOW_STRIDE,
   RELATIONSHIP_EXTRACTION_MODEL,
 } from '../lib/relationship-extraction'
+import { anchorRelations } from '../lib/relationship-anchoring'
 import type { EdgeTypeInput, ExtractedRelationship } from '../lib/relationship-extraction'
 import { resolveDocumentCoreference, COREFERENCE_MODEL } from '../lib/coreference'
 import {
@@ -34,6 +39,7 @@ import {
 } from '../lib/scope-promotion'
 
 const LLM_STEP_RETRIES = { retries: { limit: 4, delay: '5 second', backoff: 'exponential' } } as const
+
 
 /**
  * Run scope promotion for one document under a known knowledge scope. Writes
@@ -353,7 +359,7 @@ export class IngestDocumentWorkflow extends WorkflowEntrypoint<Env, IngestDocume
         `[ingest] Starting entity extraction — ${chunkIds.length} chunks, ${entityTypeContext.nodeTypes.length} node types, ${entityTypeContext.edgeTypes.length} edge types`
       )
 
-      // Phase 4: Extract entities, deduplicate, and persist — n(k + 3) steps (k = node types)
+      // Phase 4: Extract entities (one call per batch of chunks, all node types), resolve overlaps, persist — 3⌈n/b⌉ steps
       const entityRunId = await step.do('enrichment-start-entity-extraction', async () =>
         startEnrichmentRun(this.env.DB, {
           documentId,
@@ -361,68 +367,60 @@ export class IngestDocumentWorkflow extends WorkflowEntrypoint<Env, IngestDocume
           model: ENTITY_EXTRACTION_MODEL,
           params: {
             temperature: 0,
-            max_completion_tokens: 1024,
             response_format: 'json_object',
+            strategy: 'single-call-all-node-types',
+            batch_chunks: ENTITY_BATCH_CHUNKS,
             chunk_count: chunkIds.length,
           },
           ontology: entityTypeContext.nodeOntology,
         })
       )
 
+      // Chunks are extracted in batches: one call reads ENTITY_BATCH_CHUNKS
+      // consecutive chunks, amortizing the (large, static) node-type prompt.
+      const batches: number[][] = []
+      for (let i = 0; i < chunkIds.length; i += ENTITY_BATCH_CHUNKS) batches.push(chunkIds.slice(i, i + ENTITY_BATCH_CHUNKS))
+
       const entityResults = await Promise.allSettled(
-        chunkIds.map(async (chunkId) => {
-          const chunkContent = await step.do(`load-chunk-content-${chunkId}`, async () => {
-            const chunk = await this.env.DB.prepare('SELECT content FROM text_chunk WHERE id = ?')
-              .bind(chunkId)
-              .first<{ content: string }>()
-            if (!chunk) throw new Error(`Chunk ${chunkId} not found`)
-            return chunk.content
+        batches.map(async (batchChunkIds) => {
+          const contents = await step.do(`load-chunk-contents-${batchChunkIds[0]}`, async () => {
+            const ph = batchChunkIds.map(() => '?').join(', ')
+            const rows = await this.env.DB.prepare(`SELECT id, content FROM text_chunk WHERE id IN (${ph})`)
+              .bind(...batchChunkIds)
+              .all<{ id: number; content: string }>()
+            const byId = new Map(rows.results.map((r) => [r.id, r.content]))
+            return batchChunkIds.map((id) => {
+              const content = byId.get(id)
+              if (content === undefined) throw new Error(`Chunk ${id} not found`)
+              return content
+            })
           })
 
-          // Entity extraction: one step per node type
-          const rawEntities: ExtractedEntity[] = []
-          for (const nodeType of entityTypeContext.nodeTypes) {
-            const entities = await step.do(
-              `extract-entities-${chunkId}-${nodeType.name}`,
-              LLM_STEP_RETRIES,
-              async (): Promise<ExtractedEntity[]> =>
-                extractEntitiesForNodeTypes(chunkContent, [nodeType], this.env)
-            )
-            rawEntities.push(...entities)
-          }
-
-          // LLM entity deduplication
-          const entities = await step.do(
-            `deduplicate-entities-${chunkId}`,
-            async (): Promise<ExtractedEntity[]> =>
-              deduplicateEntitiesLLM(chunkContent, rawEntities, this.env)
+          // One call for all node types over the whole batch. The model assigns
+          // each string a single type; nested-span overlaps are resolved
+          // deterministically (longest span wins) — no extra LLM call.
+          const rawPerChunk = await step.do(
+            `extract-entities-batch-${batchChunkIds[0]}`,
+            LLM_STEP_RETRIES,
+            async (): Promise<ExtractedEntity[][]> =>
+              extractEntitiesBatch(contents, entityTypeContext.nodeTypes, this.env)
           )
-          // Persist entities for this chunk
-          await step.do(`persist-entities-${chunkId}`, async () => {
-            console.log(
-              `[ingest] Chunk ${chunkId}: ${entities.length} entities (${rawEntities.length} raw)`
-            )
-            if (entities.length === 0) return
 
+          await step.do(`persist-entities-batch-${batchChunkIds[0]}`, async () => {
             const entityStmt = this.env.DB.prepare(
               `INSERT OR IGNORE INTO extracted_entity
                 (source_document_id, source_chunk_id, entity_type, extracted_text,
                  chunk_start_index, chunk_end_index, scope)
                VALUES (?, ?, ?, ?, ?, ?, ?)`
             )
-            await this.env.DB.batch(
-              entities.map((entity) =>
-                entityStmt.bind(
-                  documentId,
-                  chunkId,
-                  entity.nodeType,
-                  entity.text,
-                  entity.startIndex,
-                  entity.endIndex,
-                  'chunk'
-                )
+            const stmts = batchChunkIds.flatMap((chunkId, i) => {
+              const entities = removeOverlaps(rawPerChunk[i])
+              console.log(`[ingest] Chunk ${chunkId}: ${entities.length} entities (${rawPerChunk[i].length} raw)`)
+              return entities.map((entity) =>
+                entityStmt.bind(documentId, chunkId, entity.nodeType, entity.text, entity.startIndex, entity.endIndex, 'chunk')
               )
-            )
+            })
+            if (stmts.length > 0) await this.env.DB.batch(stmts)
           })
         })
       )
@@ -439,12 +437,13 @@ export class IngestDocumentWorkflow extends WorkflowEntrypoint<Env, IngestDocume
           await failEnrichmentRun(
             this.env.DB,
             entityRunId,
-            `${failed} of ${entityResults.length} per-chunk extractions rejected`
+            `${failed} of ${entityResults.length} chunk-batch extractions rejected`
           )
         } else {
           await completeEnrichmentRun(this.env.DB, entityRunId, {
-            chunks_processed: entityResults.length,
-            chunks_failed: failed,
+            chunks_processed: chunkIds.length,
+            batches_processed: entityResults.length,
+            batches_failed: failed,
             entities_inserted: totalEntitiesRow?.n ?? 0,
             node_types: entityTypeContext.nodeTypes.length,
           })
@@ -478,7 +477,7 @@ export class IngestDocumentWorkflow extends WorkflowEntrypoint<Env, IngestDocume
       })
     }
 
-    // Phase 6: Sliding window relationship extraction — ⌈n/2⌉ · e + 1 steps (e = edge types)
+    // Phase 6: Sliding window relationship extraction — one step per window (all edge types) + 1
     if (entityTypeContext.edgeTypes.length > 0) {
       const relRunId = await step.do('enrichment-start-relationship-extraction', async () =>
         startEnrichmentRun(this.env.DB, {
@@ -487,75 +486,55 @@ export class IngestDocumentWorkflow extends WorkflowEntrypoint<Env, IngestDocume
           model: RELATIONSHIP_EXTRACTION_MODEL,
           params: {
             temperature: 0,
-            max_tokens: 2048,
             response_format: 'json_object',
-            window_size: 'sliding-3-chunks',
+            strategy: 'single-call-all-edge-types',
+            window_chunks: RELATION_WINDOW_CHUNKS,
+            window_stride: RELATION_WINDOW_STRIDE,
           },
           ontology: entityTypeContext.edgeOntology,
         })
       )
       interface WindowRelResult {
-        centerIdx: number
+        windowStart: number
         windowChunkIds: number[]
         relationships: ExtractedRelationship[]
       }
 
-      // Generate window center indices: 0, 2, 4, ... up to chunkIds.length - 1
-      const centerIndices: number[] = []
-      for (let i = 0; i < chunkIds.length; i += 2) {
-        centerIndices.push(i)
-      }
-
-      const windowCount = centerIndices.length * entityTypeContext.edgeTypes.length
-      console.log(`[ingest] Document ${documentId}: starting Phase 6 — ${windowCount} window/edge-type steps`)
+      const windows = relationWindows(chunkIds.length)
+      console.log(`[ingest] Document ${documentId}: starting Phase 6 — ${windows.length} window steps`)
 
       const windowResults = await Promise.allSettled(
-        centerIndices.flatMap((centerIdx) =>
-          entityTypeContext.edgeTypes.map((edgeType) =>
-            step.do(
-              `extract-rels-window-${centerIdx}-${edgeType.name}`,
-              LLM_STEP_RETRIES,
-              async (): Promise<WindowRelResult> => {
-                const n = chunkIds.length
-                const windowChunkIds = chunkIds.slice(
-                  Math.max(0, centerIdx - 3),
-                  Math.min(n - 1, centerIdx + 3) + 1
+        windows.map(([windowStart, windowEnd]) =>
+          step.do(
+            `extract-rels-window-${windowStart}-${windowEnd}`,
+            LLM_STEP_RETRIES,
+            async (): Promise<WindowRelResult> => {
+              const windowChunkIds = chunkIds.slice(windowStart, windowEnd)
+              const placeholders = windowChunkIds.map(() => '?').join(', ')
+              const [contentRow, entityRows] = await Promise.all([
+                this.env.DB.prepare(
+                  `SELECT GROUP_CONCAT(content, char(10)) AS window_content
+                   FROM (SELECT content FROM text_chunk WHERE id IN (${placeholders}) ORDER BY chunk_order)`
                 )
-
-                const placeholders = windowChunkIds.map(() => '?').join(', ')
-                const [contentRow, entityRows] = await Promise.all([
-                  this.env.DB.prepare(
-                    `SELECT GROUP_CONCAT(content, char(10)) AS window_content
-                     FROM (SELECT content FROM text_chunk WHERE id IN (${placeholders}) ORDER BY chunk_order)`
-                  )
-                    .bind(...windowChunkIds)
-                    .first<{ window_content: string }>(),
-                  this.env.DB.prepare(
-                    `SELECT id, entity_type, extracted_text FROM extracted_entity
-                     WHERE source_chunk_id IN (${placeholders}) AND scope = 'chunk'
-                     AND extracted_text IS NOT NULL`
-                  )
-                    .bind(...windowChunkIds)
-                    .all<{ id: number; entity_type: string; extracted_text: string }>(),
-                ])
-
-                const windowContent = contentRow?.window_content ?? ''
-
-                const entities = entityRows.results.map((r) => ({
-                  nodeType: r.entity_type,
-                  text: r.extracted_text,
-                }))
-
-                const relationships = await extractRelationshipsForEdgeType(
-                  windowContent,
-                  entities,
-                  edgeType,
-                  this.env
+                  .bind(...windowChunkIds)
+                  .first<{ window_content: string }>(),
+                this.env.DB.prepare(
+                  `SELECT entity_type, extracted_text FROM extracted_entity
+                   WHERE source_chunk_id IN (${placeholders}) AND scope = 'chunk'
+                   AND extracted_text IS NOT NULL`
                 )
+                  .bind(...windowChunkIds)
+                  .all<{ entity_type: string; extracted_text: string }>(),
+              ])
 
-                return { centerIdx, windowChunkIds, relationships }
-              }
-            )
+              const relationships = await extractRelationships(
+                contentRow?.window_content ?? '',
+                entityRows.results.map((r) => ({ nodeType: r.entity_type, text: r.extracted_text })),
+                entityTypeContext.edgeTypes,
+                this.env
+              )
+              return { windowStart, windowChunkIds, relationships }
+            }
           )
         )
       )
@@ -571,8 +550,11 @@ export class IngestDocumentWorkflow extends WorkflowEntrypoint<Env, IngestDocume
 
         // Load all chunk-scoped entities for the document
         const entityRows = await this.env.DB.prepare(
-          `SELECT id, entity_type, extracted_text, parent_id, source_chunk_id
-           FROM extracted_entity WHERE source_document_id = ? AND scope = 'chunk'`
+          `SELECT ee.id, ee.entity_type, ee.extracted_text, ee.parent_id, ee.source_chunk_id,
+                  ee.chunk_start_index, tc.chunk_order
+           FROM extracted_entity ee
+           LEFT JOIN text_chunk tc ON tc.id = ee.source_chunk_id
+           WHERE ee.source_document_id = ? AND ee.scope = 'chunk'`
         )
           .bind(documentId)
           .all<{
@@ -581,6 +563,8 @@ export class IngestDocumentWorkflow extends WorkflowEntrypoint<Env, IngestDocume
             extracted_text: string | null
             parent_id: number | null
             source_chunk_id: number | null
+            chunk_start_index: number | null
+            chunk_order: number | null
           }>()
 
         const entityMap = new Map(
@@ -595,18 +579,6 @@ export class IngestDocumentWorkflow extends WorkflowEntrypoint<Env, IngestDocume
           ])
         )
 
-        // Build text→entity IDs index per chunk
-        const textToEntityIds = new Map<string, number[]>()
-        for (const [id, info] of entityMap) {
-          if (!info.extractedText) continue
-          const existing = textToEntityIds.get(info.extractedText)
-          if (existing) {
-            existing.push(id)
-          } else {
-            textToEntityIds.set(info.extractedText, [id])
-          }
-        }
-
         interface ChunkRelRow {
           from_entity_id: number
           to_entity_id: number
@@ -620,38 +592,27 @@ export class IngestDocumentWorkflow extends WorkflowEntrypoint<Env, IngestDocume
         for (const result of windowResults) {
           if (result.status !== 'fulfilled') continue
           const { windowChunkIds, relationships } = result.value
-
           const windowChunkSet = new Set(windowChunkIds)
-          // Entity IDs whose source_chunk_id is in this window
-          const windowEntityIds = new Set<number>()
-          for (const [id, info] of entityMap) {
-            if (info.sourceChunkId !== null && windowChunkSet.has(info.sourceChunkId)) {
-              windowEntityIds.add(id)
-            }
-          }
-
-          for (const rel of relationships) {
-            const fromIds = (textToEntityIds.get(rel.fromText) ?? []).filter((id) =>
-              windowEntityIds.has(id)
-            )
-            const toIds = (textToEntityIds.get(rel.toText) ?? []).filter((id) =>
-              windowEntityIds.has(id)
-            )
-
-            for (const fromId of fromIds) {
-              for (const toId of toIds) {
-                if (fromId === toId) continue
-                const key = `${fromId}|${toId}|${rel.edgeType}`
-                if (chunkRelSeen.has(key)) continue
-                chunkRelSeen.add(key)
-                chunkRels.push({
-                  from_entity_id: fromId,
-                  to_entity_id: toId,
-                  edgeType: rel.edgeType,
-                  explanation: rel.explanation,
-                })
-              }
-            }
+          const windowMentions = entityRows.results
+            .filter((r) => r.extracted_text && r.source_chunk_id !== null && windowChunkSet.has(r.source_chunk_id))
+            .map((r) => ({
+              id: r.id,
+              text: r.extracted_text!,
+              chunkId: r.source_chunk_id!,
+              chunkOrder: r.chunk_order ?? 0,
+              startIndex: r.chunk_start_index ?? 0,
+            }))
+          // One anchored row per co-occurring chunk — not every mention pair.
+          for (const rel of anchorRelations(relationships, windowMentions)) {
+            const key = `${rel.fromEntityId}|${rel.toEntityId}|${rel.edgeType}`
+            if (chunkRelSeen.has(key)) continue
+            chunkRelSeen.add(key)
+            chunkRels.push({
+              from_entity_id: rel.fromEntityId,
+              to_entity_id: rel.toEntityId,
+              edgeType: rel.edgeType,
+              explanation: rel.explanation,
+            })
           }
         }
 

@@ -1,12 +1,12 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { extractEntities, extractEntitiesForNodeTypesWithUsage, deduplicateEntitiesLLM, removeOverlaps } from './entity-extraction'
+import { extractEntities, extractEntitiesForNodeTypesWithUsage, deduplicateEntitiesLLM, removeOverlaps, ENTITY_EXTRACTION_MODEL } from './entity-extraction'
 import type { NodeTypeInput, ExtractedEntity } from './entity-extraction'
 
 function kimiResponse(content: string) {
   return { choices: [{ message: { content } }] }
 }
 
-describe('entity-extraction with kimi-k2.6 response shape', () => {
+describe('entity-extraction with chat-completion response shape', () => {
   let mockEnv: { AI: { run: ReturnType<typeof vi.fn> } }
 
   beforeEach(() => {
@@ -15,7 +15,7 @@ describe('entity-extraction with kimi-k2.6 response shape', () => {
 
   it('extracts entities from a chat-completion-shaped response', async () => {
     mockEnv.AI.run.mockResolvedValue(
-      kimiResponse('{"entities":[{"text":"北京"}]}'),
+      kimiResponse('{"entities":{"Location":["北京"]}}'),
     )
     const nodeTypes: NodeTypeInput[] = [
       { name: 'Location', definition: 'A place', examples: [] },
@@ -25,11 +25,11 @@ describe('entity-extraction with kimi-k2.6 response shape', () => {
     const entities = await extractEntities(chunk, nodeTypes, mockEnv as unknown as Env)
 
     expect(mockEnv.AI.run).toHaveBeenCalledWith(
-      '@cf/moonshotai/kimi-k2.6',
+      ENTITY_EXTRACTION_MODEL,
       expect.objectContaining({
         max_completion_tokens: 1024,
         response_format: { type: 'json_object' },
-        chat_template_kwargs: { thinking: false },
+        chat_template_kwargs: { thinking: false, enable_thinking: false },
       }),
     )
     expect(entities).toEqual([
@@ -39,7 +39,7 @@ describe('entity-extraction with kimi-k2.6 response shape', () => {
 
   it('finds all occurrences of an extracted entity', async () => {
     mockEnv.AI.run.mockResolvedValue(
-      kimiResponse('{"entities":[{"text":"北京"}]}'),
+      kimiResponse('{"entities":{"Location":["北京"]}}'),
     )
     const entities = await extractEntities(
       '北京和北京',
@@ -61,6 +61,20 @@ describe('entity-extraction with kimi-k2.6 response shape', () => {
     expect(entities).toEqual([])
   })
 
+  it('extracts all node types in a single call', async () => {
+    mockEnv.AI.run.mockResolvedValue(kimiResponse('{"entities":{"Location":["北京"],"Person":["张三"]}}'))
+    const entities = await extractEntities(
+      '张三去北京',
+      [
+        { name: 'Location', definition: '', examples: [] },
+        { name: 'Person', definition: '', examples: [] },
+      ],
+      mockEnv as unknown as Env,
+    )
+    expect(mockEnv.AI.run).toHaveBeenCalledTimes(1)
+    expect(entities.map((e) => e.nodeType)).toEqual(['Person', 'Location'])
+  })
+
   it('returns [] when the content is malformed JSON', async () => {
     mockEnv.AI.run.mockResolvedValue(kimiResponse('not json at all'))
     const entities = await extractEntities(
@@ -73,7 +87,7 @@ describe('entity-extraction with kimi-k2.6 response shape', () => {
 
   it('handles JSON wrapped in markdown fences', async () => {
     mockEnv.AI.run.mockResolvedValue(
-      kimiResponse('```json\n{"entities":[{"text":"北京"}]}\n```'),
+      kimiResponse('```json\n{"entities":{"Location":["北京"]}}\n```'),
     )
     const entities = await extractEntities(
       '北京',
@@ -85,7 +99,7 @@ describe('entity-extraction with kimi-k2.6 response shape', () => {
   })
 })
 
-describe('deduplicateEntitiesLLM with kimi-k2.6 response shape', () => {
+describe('deduplicateEntitiesLLM with chat-completion response shape', () => {
   it('returns entities unchanged when there are no conflicts', async () => {
     const env = { AI: { run: vi.fn() } }
     const entities: ExtractedEntity[] = [
@@ -147,10 +161,10 @@ describe('extractEntitiesForNodeTypesWithUsage options propagation', () => {
       { thinking: true, maxCompletionTokens: 8192 },
     )
     expect(env.AI.run).toHaveBeenCalledWith(
-      '@cf/moonshotai/kimi-k2.6',
+      ENTITY_EXTRACTION_MODEL,
       expect.objectContaining({
         max_completion_tokens: 8192,
-        chat_template_kwargs: { thinking: true },
+        chat_template_kwargs: { thinking: true, enable_thinking: true },
       }),
     )
   })
@@ -159,7 +173,7 @@ describe('extractEntitiesForNodeTypesWithUsage options propagation', () => {
     const env = {
       AI: {
         run: vi.fn().mockResolvedValue({
-          choices: [{ message: { content: '{"entities":[{"text":"北京"}]}' }, finish_reason: 'stop' }],
+          choices: [{ message: { content: '{"entities":{"Location":["北京"]}}' }, finish_reason: 'stop' }],
           usage: { prompt_tokens: 200, completion_tokens: 30, total_tokens: 230 },
         }),
       },
@@ -174,7 +188,7 @@ describe('extractEntitiesForNodeTypesWithUsage options propagation', () => {
     expect(runs[0].entities).toHaveLength(1)
     expect(runs[0].usage).toEqual({ promptTokens: 200, completionTokens: 30, totalTokens: 230 })
     expect(runs[0].finishReason).toBe('stop')
-    expect(runs[0].rawContent).toBe('{"entities":[{"text":"北京"}]}')
+    expect(runs[0].rawContent).toBe('{"entities":{"Location":["北京"]}}')
     expect(typeof runs[0].latencyMs).toBe('number')
     expect(runs[0].latencyMs).toBeGreaterThanOrEqual(0)
   })
@@ -191,10 +205,10 @@ describe('extractEntitiesForNodeTypesWithUsage options propagation', () => {
       env as unknown as Env,
     )
     expect(env.AI.run).toHaveBeenCalledWith(
-      '@cf/moonshotai/kimi-k2.6',
+      ENTITY_EXTRACTION_MODEL,
       expect.objectContaining({
         max_completion_tokens: 1024,
-        chat_template_kwargs: { thinking: false },
+        chat_template_kwargs: { thinking: false, enable_thinking: false },
       }),
     )
   })
