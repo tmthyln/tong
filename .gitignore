@@ -51,3 +51,7 @@ __screenshots__/
 # Python container test venv
 container/.venv
 container/__pycache__/
+
+# Extraction eval: datasets (third-party / copyrighted text) and run outputs stay local
+eval/extraction/data/
+eval/extraction/results/

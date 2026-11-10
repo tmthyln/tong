@@ -1,0 +1,35 @@
+{
+  "cards": [
+    {
+      "k": "Entity extraction cost, in-domain",
+      "v": "$11.84 → $0.18",
+      "d": "per 1M chars · 66× cheaper · F1 0.530 → 0.597"
+    },
+    {
+      "k": "Relation extraction cost, in-domain",
+      "v": "$10.62 → $0.21",
+      "d": "per 1M chars per window · 50× cheaper · F1 0.256 → 0.701"
+    },
+    {
+      "k": "LLM calls per 4-chunk window",
+      "v": "56 → 2",
+      "d": "4 chunks × (10 types + dedupe) + 12 edge types → 1 NER + 1 RE"
+    },
+    {
+      "k": "Relation precision, in-domain",
+      "v": "0.15 → 0.67",
+      "d": "per-edge-type prompting over-generated ~6×"
+    }
+  ],
+  "findings": [
+    "<b>One call for all labels beats one call per label</b> on cost everywhere and on quality almost everywhere. Asking the model about one relation type at a time pushes it to find something for each type: the legacy relation pass had 0.88 recall but 0.15 precision in-domain (the local DB held one fact, 唐三 MEMBER_OF 唐门, tagged with five different relation types).",
+    "<b>Model choice matters more than model size.</b> gemma-4-26b-a4b (a 4B-active MoE) is on the frontier at the low-cost end of every non-thinking plot ($0.18–0.48 per 1M chars). For in-domain relations, gpt-oss-120b (0.81) and glm-5.3-flash (0.80) buy about 10 more F1 points for 1.5–5× the cost and higher latency. kimi-k2.6, the previous default, is off the frontier in every plot without thinking.",
+    "<b>Batching four chunks per entity call</b> cut entity cost about 3× (the ~1K-token ontology prompt is paid once per window instead of per chunk) for about 2.6 F1 points with gemma; deepseek-v4.1-flash actually improved with batching.",
+    "<b>Pipeline beats joint extraction.</b> With predicted entities, a two-call pipeline (window NER → closed-world RE with evidence) gets 0.40 end-to-end relation F1 for $0.43; single-call joint extraction with the same model gets 0.12. Only deepseek-v4.1-flash does joint well (0.43 RE, $0.42).",
+    "<b>Asking for evidence strings is nearly free and slightly helps</b> (gemma RE 0.687 → 0.701 in-domain, 0.176 → 0.187 on the benchmark, +10–15% cost), so production keeps the explanation shown in the knowledge graph.",
+    "<b>The public benchmark ranks strategies the same way</b> but scores lower overall: it annotates descriptive noun phrases (\"两旁的商店\", \"峡谷中\") with its own boundary conventions, which string-level matching punishes, and its relation directions are inconsistent. Read it for relative order, not absolute quality.",
+    "<b>Thinking mode is excluded.</b> In an earlier sweep it was the only route above ~0.65 entity F1 in-domain, but at 17–390× the cost, 30–60× the latency and frequent truncation, and the silver labels were themselves made with thinking. For span extraction at ingest scale it is not worth it, so those runs are left out of this report."
+  ],
+  "plateNote": "Cost is billed Workers AI neurons for the whole strategy (joint and pipeline cells include both tasks, so they sit further right on each plate). Relation plates give gold entities to every strategy except joint and pipeline, which use their own predicted entities. Squares are window-batched or evidence variants.",
+  "method": "<p><b>Datasets.</b> <i>lit</i>: 40 passages (~350 chars, each with at least one relation) sampled from the test split of the Chinese Literature NER/RE dataset (Xu et al., 2017), 7 coarse entity types (pronouns dropped) and 9 relation types. <i>douluo</i>: 12 windows of 4 consecutive novel chunks (~1,000 chars) from the local library, scored against the app's own 10 node types and 12 edge types. Its labels are silver: a ≥2-of-3 majority vote of kimi-k2.6, deepseek-v4-pro and glm-5.3 with thinking on (per-chunk entities, then closed-world relations over the voted entities), with calls that ran out of tokens retried without thinking.</p><p style=\"margin-top:8px\"><b>Scoring.</b> Micro P/R/F1 over unique (text, type) mentions and (head, type, tail) triples per passage. <b>Cost</b> is measured: the neurons Workers AI reports per call at $0.011 per 1,000, so prompt caching is included. <b>Latency</b> is wall-clock per window with a strategy's calls issued in parallel. Every run is temperature 0, JSON mode. Runs with transport errors (rate limits under load, an expired token) were discarded and re-run; any remaining are counted in the table.</p><p style=\"margin-top:8px\"><b>Baseline.</b> \"Current app pipeline\" is a frozen copy of the pre-refactor code: kimi-k2.6 with one call per node type per chunk plus an LLM dedupe call, and one call per edge type per window. Everything else runs the new schema-driven extractor in <code>server/lib/extraction</code>. Harness: <code>npm run eval:extraction</code>.</p><p style=\"margin-top:8px\"><b>Gaps.</b> Per-label strategies were run for kimi-k2.6 and gemma only; glm-5.3-flash could not sustain the 7–12× call fan-out (about 40% of calls failed even when run alone). Every run is thinking off.</p>"
+}

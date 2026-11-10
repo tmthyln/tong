@@ -1,0 +1,243 @@
+<title>Extraction Efficiency Frontier</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&family=Fraunces:opsz,wght@9..144,600&display=swap">
+<style>
+/* Layout: a lab notebook — narrow reading column for findings, full-width chart plates, a dense results ledger. */
+:root {
+  --bg: #f7f8f6; --surface: #ffffff; --ink: #14161a; --ink-2: #4d525a; --ink-3: #80858d;
+  --rule: #e2e5e1; --grid: #eceeeb; --accent: #2a78d6;
+  --s-all: #2a78d6; --s-per: #eb6834; --s-joint: #1baf7a; --s-legacy: #8b9099;
+  --good: #1f7a3d; --bad: #b3261e;
+  --display: "Fraunces", Georgia, serif; --sans: "IBM Plex Sans", system-ui, sans-serif; --mono: "IBM Plex Mono", ui-monospace, monospace;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #121417; --surface: #1a1c20; --ink: #eef0f2; --ink-2: #b9bec6; --ink-3: #868c95;
+  --rule: #2c3036; --grid: #24272c; --accent: #3987e5;
+  --s-all: #3987e5; --s-per: #d95926; --s-joint: #199e70; --s-legacy: #7d838c; --good: #5cc27f; --bad: #f08a80; color-scheme: dark } }
+:root[data-theme="dark"] {
+  --bg: #121417; --surface: #1a1c20; --ink: #eef0f2; --ink-2: #b9bec6; --ink-3: #868c95;
+  --rule: #2c3036; --grid: #24272c; --accent: #3987e5;
+  --s-all: #3987e5; --s-per: #d95926; --s-joint: #199e70; --s-legacy: #7d838c; --good: #5cc27f; --bad: #f08a80; color-scheme: dark }
+body { background: var(--bg); color: var(--ink); font: 15px/1.55 var(--sans); }
+.wrap { max-width: 1120px; margin: 0 auto; padding-block: 40px 64px; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); display: grid; gap: 36px; }
+h1 { font: 600 clamp(28px, 4vw, 40px)/1.1 var(--display); margin: 0; text-wrap: balance; letter-spacing: -0.01em; }
+h2 { font: 600 22px/1.2 var(--display); margin: 0; text-wrap: balance; }
+h3 { font: 600 13px/1.3 var(--sans); margin: 0; letter-spacing: .06em; text-transform: uppercase; color: var(--ink-2); }
+p { margin: 0; max-width: 68ch; }
+.lede { color: var(--ink-2); font-size: 16px; }
+.meta { font: 12px/1.5 var(--mono); color: var(--ink-3); }
+code, .mono { font-family: var(--mono); font-size: .92em; }
+.findings { display: grid; gap: 12px; max-width: 76ch; padding: 0; margin: 0; list-style: none; counter-reset: f; }
+.findings li { display: grid; grid-template-columns: 28px 1fr; gap: 8px; }
+.findings li::before { counter-increment: f; content: counter(f); font: 500 13px/1.6 var(--mono); color: var(--accent); }
+.controls { display: flex; flex-wrap: wrap; gap: 16px 24px; align-items: center; }
+.seg { display: inline-flex; border: 1px solid var(--rule); border-radius: 8px; overflow: hidden; background: var(--surface); }
+.seg button { font: 500 13px var(--sans); color: var(--ink-2); background: none; border: 0; padding: 6px 12px; cursor: pointer; }
+.seg button + button { border-left: 1px solid var(--rule); }
+.seg button[aria-pressed="true"] { background: var(--ink); color: var(--bg); }
+.seg button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.label { font: 500 12px var(--sans); color: var(--ink-3); letter-spacing: .04em; text-transform: uppercase; margin-right: 8px; }
+.plates { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 500px), 1fr)); gap: 20px; }
+.plate { background: var(--surface); border: 1px solid var(--rule); border-radius: 10px; padding: 18px 18px 10px; display: grid; gap: 10px; min-width: 0; position: relative; }
+.plate .sub { font-size: 13px; color: var(--ink-3); }
+.plate svg { width: 100%; height: auto; display: block; overflow: visible; }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 18px; font-size: 13px; color: var(--ink-2); }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.sw { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+.tip { position: absolute; pointer-events: none; background: var(--ink); color: var(--bg); font: 12px/1.45 var(--sans); padding: 8px 10px; border-radius: 6px; max-width: 280px; z-index: 5; }
+.tip b { font-weight: 600; } .tip .mono { opacity: .85; }
+.tablewrap { overflow-x: auto; border: 1px solid var(--rule); border-radius: 10px; background: var(--surface); }
+table { border-collapse: collapse; width: 100%; font-size: 13px; font-variant-numeric: tabular-nums; }
+th, td { padding: 7px 10px; text-align: right; white-space: nowrap; border-bottom: 1px solid var(--grid); }
+th:first-child, td:first-child, th:nth-child(2), td:nth-child(2) { text-align: left; }
+th { font: 600 12px var(--sans); color: var(--ink-2); position: sticky; top: 0; background: var(--surface); cursor: pointer; user-select: none; }
+th[aria-sort] { color: var(--ink); }
+tr.front td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
+.chip { display: inline-block; font: 500 11px var(--sans); padding: 1px 7px; border-radius: 99px; border: 1px solid var(--rule); color: var(--ink-2); }
+.chip.f { border-color: var(--accent); color: var(--accent); }
+.note { font-size: 13px; color: var(--ink-2); max-width: 80ch; }
+.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 240px), 1fr)); gap: 16px; }
+.card { background: var(--surface); border: 1px solid var(--rule); border-radius: 10px; padding: 16px; display: grid; gap: 4px; }
+.card .v { font: 600 26px/1.1 var(--sans); font-variant-numeric: tabular-nums; }
+.card .k { font-size: 13px; color: var(--ink-2); }
+.card .d { font-size: 13px; color: var(--good); }
+@media (prefers-reduced-motion: no-preference) { .pt { transition: r .12s; } }
+</style>
+
+<div class="wrap">
+  <header style="display:grid;gap:12px">
+    <div class="meta" id="stamp"></div>
+    <h1>Entity &amp; relation extraction: cost vs quality</h1>
+    <p class="lede">Workers AI models and prompting strategies for Tong's information-extraction pipeline, measured on a public Chinese literature NER/RE benchmark and on in-domain novel chunks with the app's own ontology. Lower-left is cheap and bad; upper-left is where you want to be. The line traces the efficiency frontier.</p>
+  </header>
+
+  <section style="display:grid;gap:16px">
+    <h2>Headline</h2>
+    <div class="cards" id="cards"></div>
+    <ol class="findings" id="findings"></ol>
+  </section>
+
+  <section style="display:grid;gap:16px">
+    <h2>Frontier</h2>
+    <div class="controls">
+      <div><span class="label">Quality</span><span class="seg" id="q-seg"><button data-v="f1" aria-pressed="true">F1</button><button data-v="p" aria-pressed="false">Precision</button><button data-v="r" aria-pressed="false">Recall</button></span></div>
+      <div><span class="label">Cost</span><span class="seg" id="c-seg"><button data-v="usd" aria-pressed="true">$ / 1M chars</button><button data-v="lat" aria-pressed="false">Latency / window</button></span></div>
+    </div>
+    <div class="legend" id="legend"></div>
+    <div class="plates" id="plates"></div>
+    <p class="note" id="plate-note"></p>
+  </section>
+
+  <section style="display:grid;gap:12px">
+    <h2>All runs</h2>
+    <p class="note">Micro-averaged over passages at string level: a mention is correct when its exact text and type match; a relation when head, type and tail match. "Undirected" ignores direction (the benchmark's own direction labels are inconsistent). Cost is measured Workers AI neurons at $0.011 per 1,000. Frontier rows are marked on the left edge.</p>
+    <div class="controls"><span class="seg" id="t-seg"></span></div>
+    <div class="tablewrap"><table id="tbl"></table></div>
+  </section>
+
+  <section style="display:grid;gap:10px">
+    <h2>Method</h2>
+    <div class="note" id="method"></div>
+  </section>
+</div>
+
+<script>
+const DATA = /*DATA*/null;
+const FAMILY = s => s.startsWith('legacy') ? 'legacy' : s.endsWith('per-label') ? 'per' : s.startsWith('joint') ? 'joint' : 'all';
+const FAM_LABEL = { legacy: 'Current app pipeline', per: 'One call per label', all: 'One call, all labels', joint: 'Joint NER+RE, one call' };
+const FAM_VAR = { legacy: '--s-legacy', per: '--s-per', all: '--s-all', joint: '--s-joint' };
+const css = v => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+const short = m => m.replace(/^@cf\/[^/]+\//, '').replace(/-instruct.*|-it$|-fp8.*|-0731|-1017/g, '');
+const fmt$ = v => v >= 10 ? v.toFixed(0) : v >= 1 ? v.toFixed(1) : v.toFixed(2);
+let Q = 'f1', C = 'usd';
+
+const runs = DATA.runs;
+const datasets = [...new Set(runs.map(r => r.dataset))].sort();
+const DS_LABEL = { lit: 'Chinese Literature benchmark', douluo: 'In-domain novel (silver labels)' };
+
+function points(ds, task) {
+  return runs.filter(r => r.dataset === ds && r[task]).map(r => {
+    const m = task === 'ner' ? r.ner.typed : r.re.strict;
+    return { r, task, q: m[Q], cost: C === 'usd' ? r.usdPerMChar : r.meanWallMs / 1000, fam: FAMILY(r.strategy) };
+  }).filter(p => p.cost > 0);
+}
+function frontier(pts) {
+  const s = [...pts].sort((a, b) => a.cost - b.cost || b.q - a.q); const out = []; let best = -1;
+  for (const p of s) if (p.q > best) { out.push(p); best = p.q; }
+  return out;
+}
+
+const tip = document.createElement('div'); tip.className = 'tip'; tip.hidden = true;
+
+function plate(ds, task) {
+  const pts = points(ds, task); if (!pts.length) return null;
+  const el = document.createElement('div'); el.className = 'plate';
+  const n = runs.find(r => r.dataset === ds)?.n ?? 0;
+  el.innerHTML = `<h3>${task === 'ner' ? 'Entities' : 'Relations'} · ${DS_LABEL[ds] ?? ds}</h3><div class="sub">${task === 'ner' ? 'Typed mention' : 'Strict triple'} ${Q === 'f1' ? 'F1' : Q === 'p' ? 'precision' : 'recall'} vs ${C === 'usd' ? 'cost (log scale)' : 'mean latency per window (log scale)'} · ${n} passages${task === 're' ? ' · gold entities given, except joint' : ''}</div>`;
+  const W = 520, H = 330, L = 44, R = 16, T = 12, B = 40;
+  const xs = pts.map(p => p.cost), lo = Math.min(...xs), hi = Math.max(...xs);
+  const x0 = Math.log10(lo) - 0.12, x1 = Math.log10(hi) + 0.12;
+  const qmax = Math.min(1, Math.ceil((Math.max(...pts.map(p => p.q)) + 0.05) * 10) / 10);
+  const X = v => L + (Math.log10(v) - x0) / (x1 - x0) * (W - L - R);
+  const qmin = Math.max(0, Math.floor((Math.min(...pts.map(p => p.q)) - 0.05) * 10) / 10);
+  const Y = v => T + (1 - (v - qmin) / (qmax - qmin)) * (H - T - B);
+  const ns = 'http://www.w3.org/2000/svg'; const svg = document.createElementNS(ns, 'svg');
+  svg.setAttribute('viewBox', `0 0 ${W} ${H}`); svg.setAttribute('role', 'img');
+  const add = (tag, attrs, parent = svg) => { const e = document.createElementNS(ns, tag); for (const k in attrs) e.setAttribute(k, attrs[k]); parent.appendChild(e); return e; };
+  // grid + axes
+  for (let i = 0; i <= 5; i++) { const v = qmin + (qmax - qmin) * i / 5, y = Y(v);
+    add('line', { x1: L, x2: W - R, y1: y, y2: y, stroke: css('--grid'), 'stroke-width': 1 });
+    add('text', { x: L - 8, y: y + 4, 'text-anchor': 'end', 'font-size': 11, fill: css('--ink-3'), 'font-family': 'IBM Plex Mono, monospace' }).textContent = v.toFixed(2); }
+  const decades = []; for (let e = Math.floor(x0); e <= Math.ceil(x1); e++) for (const m of [1, 2, 5]) { const v = m * 10 ** e; if (Math.log10(v) >= x0 && Math.log10(v) <= x1) decades.push(v); }
+  for (const v of decades) { const x = X(v);
+    add('line', { x1: x, x2: x, y1: T, y2: H - B, stroke: css('--grid'), 'stroke-width': 1 });
+    add('text', { x, y: H - B + 16, 'text-anchor': 'middle', 'font-size': 11, fill: css('--ink-3'), 'font-family': 'IBM Plex Mono, monospace' }).textContent = C === 'usd' ? '$' + (v < 1 ? v : v.toFixed(0)) : v + 's'; }
+  add('text', { x: (L + W - R) / 2, y: H - 6, 'text-anchor': 'middle', 'font-size': 12, fill: css('--ink-2') }).textContent = C === 'usd' ? 'USD per 1M input characters' : 'seconds per window';
+  // frontier step line
+  const fr = frontier(pts); let d = '';
+  fr.forEach((p, i) => { const x = X(p.cost), y = Y(p.q); d += i === 0 ? `M${x},${y}` : `H${x}V${y}`; });
+  if (fr.length) d += `H${W - R}`;
+  add('path', { d, fill: 'none', stroke: css('--ink-2'), 'stroke-width': 2, 'stroke-linejoin': 'round', 'stroke-dasharray': '0', opacity: .55 });
+  const frSet = new Set(fr);
+  // points
+  const sorted = [...pts].sort((a, b) => (frSet.has(a) - frSet.has(b)));
+  for (const p of sorted) {
+    const x = X(p.cost), y = Y(p.q), color = css(FAM_VAR[p.fam]);
+    const isTh = p.r.thinking, isWin = /window|evidence/.test(p.r.strategy);
+    let mark;
+    if (isWin) mark = add('rect', { x: x - 5, y: y - 5, width: 10, height: 10, rx: 2, fill: color, stroke: css('--surface'), 'stroke-width': 2 });
+    else mark = add('circle', { cx: x, cy: y, r: frSet.has(p) ? 6 : 5, fill: isTh ? css('--surface') : color, stroke: isTh ? color : css('--surface'), 'stroke-width': isTh ? 2.5 : 2, class: 'pt' });
+    const hit = add('circle', { cx: x, cy: y, r: 12, fill: 'transparent', tabindex: 0 });
+    const show = () => { const m = p.task === 'ner' ? p.r.ner.typed : p.r.re.strict;
+      tip.innerHTML = `<b>${short(p.r.model)}</b>${p.r.thinking ? ' · thinking' : ''}<br>${p.r.strategy}<br><span class="mono">F1 ${m.f1.toFixed(3)} · P ${m.p.toFixed(3)} · R ${m.r.toFixed(3)}<br>$${fmt$(p.r.usdPerMChar)}/1M chars · ${(p.r.meanWallMs / 1000).toFixed(1)}s/window · ${p.r.callsPerKChar.toFixed(1)} calls/1K chars</span>`;
+      tip.hidden = false; el.appendChild(tip);
+      const bx = svg.getBoundingClientRect(), pb = el.getBoundingClientRect(), sc = bx.width / W;
+      let left = bx.left - pb.left + x * sc + 12; if (left + 280 > pb.width) left = bx.left - pb.left + x * sc - 292;
+      tip.style.left = Math.max(4, left) + 'px'; tip.style.top = (bx.top - pb.top + y * sc - 10) + 'px'; };
+    hit.addEventListener('mouseenter', show); hit.addEventListener('focus', show);
+    hit.addEventListener('mouseleave', () => tip.hidden = true); hit.addEventListener('blur', () => tip.hidden = true);
+  }
+  // labels on frontier points only, placed to avoid each other and the marks
+  const TAG = { 'ner-all-labels-window': 'batched', 'joint-ner-re': 'joint', 'pipeline-ner-re': 'pipeline', 're-all-labels-evidence': '+evidence', 'ner-per-label': 'per-label', 're-per-label': 'per-label', 'legacy-ner': 'legacy', 'legacy-re': 'legacy' };
+  const boxes = pts.map(p => ({ x0: X(p.cost) - 6, x1: X(p.cost) + 6, y0: Y(p.q) - 6, y1: Y(p.q) + 6 }));
+  const hits = b => boxes.some(o => b.x0 < o.x1 && b.x1 > o.x0 && b.y0 < o.y1 && b.y1 > o.y0);
+  fr.forEach(p => {
+    const x = X(p.cost), y = Y(p.q);
+    const text = short(p.r.model) + (p.r.thinking ? ' (think)' : '') + (TAG[p.r.strategy] ? ' · ' + TAG[p.r.strategy] : '');
+    const w = text.length * 6.1 + 4, h = 13;
+    const cands = [[x + 9, y - 16], [x + 9, y + 4], [x - 9 - w, y - 16], [x - 9 - w, y + 4]];
+    for (const dy of [30, 46, 62, 78]) cands.push([x + 14, y + dy], [x + 14, y - dy - h], [x - 14 - w, y + dy], [x - 14 - w, y - dy - h]);
+    for (const [lx, ly] of cands) {
+      const box = { x0: lx, x1: lx + w, y0: ly, y1: ly + h };
+      if (lx < L || lx + w > W - 2 || ly < 0 || ly + h > H - B || hits(box)) continue;
+      boxes.push(box);
+      const far = Math.abs(ly + h / 2 - y) > 20;
+      if (far) add('line', { x1: x, y1: y, x2: lx < x ? lx + w : lx, y2: ly + h / 2, stroke: css('--ink-3'), 'stroke-width': 1 });
+      add('text', { x: lx, y: ly + 10, 'font-size': 11, fill: css('--ink'), 'font-family': 'IBM Plex Sans, sans-serif' }).textContent = text;
+      break;
+    }
+  });
+  el.appendChild(svg);
+  return el;
+}
+
+function renderPlates() {
+  const host = document.getElementById('plates'); host.innerHTML = '';
+  for (const ds of datasets) for (const t of ['ner', 're']) { const p = plate(ds, t); if (p) host.appendChild(p); }
+}
+function renderLegend() {
+  document.getElementById('legend').innerHTML = Object.keys(FAM_LABEL).map(f => `<span><i class="sw" style="background:var(${FAM_VAR[f]})"></i>${FAM_LABEL[f]}</span>`).join('')
+    + `<span><i class="sw" style="border:2px solid var(--ink-3);background:var(--surface)"></i>Thinking on</span><span><i class="sw" style="border-radius:2px;background:var(--ink-3)"></i>Window-batched / with evidence</span>`;
+}
+
+// ------------------------------------------------ table
+let TASK = 'ner', sortKey = 'f1', sortDir = -1;
+function renderTable() {
+  const seg = document.getElementById('t-seg');
+  const tabs = datasets.flatMap(ds => ['ner', 're'].map(t => [ds, t]));
+  if (!seg.childElementCount) { tabs.forEach(([ds, t], i) => { const b = document.createElement('button'); b.textContent = `${ds} · ${t === 'ner' ? 'entities' : 'relations'}`; b.dataset.v = ds + '|' + t; b.setAttribute('aria-pressed', i === 0); seg.appendChild(b); });
+    seg.addEventListener('click', e => { const b = e.target.closest('button'); if (!b) return; seg.querySelectorAll('button').forEach(x => x.setAttribute('aria-pressed', x === b)); TASK = b.dataset.v; renderTable(); }); TASK = tabs[0].join('|'); }
+  const [ds, t] = TASK.split('|');
+  const pts = points(ds, t); const fr = new Set(frontier(pts).map(p => p.r));
+  const rows = pts.map(p => { const m = t === 'ner' ? p.r.ner : p.r.re; const s = t === 'ner' ? m.typed : m.strict; const u = t === 'ner' ? m.untyped : m.undirected;
+    return { r: p.r, model: short(p.r.model) + (p.r.thinking ? ' (think)' : ''), strategy: p.r.strategy, f1: s.f1, p: s.p, r_: s.r, u: u.f1, usd: p.r.usdPerMChar, lat: p.r.meanWallMs / 1000, calls: p.r.callsPerKChar, err: p.r.errors + p.r.truncated }; });
+  const cols = [['model', 'Model'], ['strategy', 'Strategy'], ['f1', 'F1'], ['p', 'P'], ['r_', 'R'], ['u', t === 'ner' ? 'Untyped F1' : 'Undirected F1'], ['usd', '$ / 1M chars'], ['lat', 's / window'], ['calls', 'Calls / 1K chars'], ['err', 'Errors + truncations']];
+  rows.sort((a, b) => (a[sortKey] > b[sortKey] ? 1 : a[sortKey] < b[sortKey] ? -1 : 0) * sortDir);
+  const tbl = document.getElementById('tbl');
+  tbl.innerHTML = `<thead><tr>${cols.map(([k, l]) => `<th data-k="${k}" ${k === sortKey ? `aria-sort="${sortDir > 0 ? 'ascending' : 'descending'}"` : ''}>${l}${k === sortKey ? (sortDir > 0 ? ' ↑' : ' ↓') : ''}</th>`).join('')}</tr></thead><tbody>${rows.map(r => `<tr class="${fr.has(r.r) ? 'front' : ''}"><td>${r.model}</td><td><span class="chip ${fr.has(r.r) ? 'f' : ''}">${r.strategy}</span></td><td>${r.f1.toFixed(3)}</td><td>${r.p.toFixed(3)}</td><td>${r.r_.toFixed(3)}</td><td>${r.u.toFixed(3)}</td><td>${fmt$(r.usd)}</td><td>${r.lat.toFixed(1)}</td><td>${r.calls.toFixed(2)}</td><td>${r.err}</td></tr>`).join('')}</tbody>`;
+  tbl.querySelectorAll('th').forEach(th => th.addEventListener('click', () => { const k = th.dataset.k; sortDir = k === sortKey ? -sortDir : (k === 'model' || k === 'strategy' || k === 'usd' || k === 'lat' || k === 'calls' || k === 'err' ? 1 : -1); sortKey = k; renderTable(); }));
+}
+
+function seg(id, set) { const s = document.getElementById(id); s.addEventListener('click', e => { const b = e.target.closest('button'); if (!b) return; s.querySelectorAll('button').forEach(x => x.setAttribute('aria-pressed', x === b)); set(b.dataset.v); renderPlates(); renderTable(); }); }
+seg('q-seg', v => Q = v); seg('c-seg', v => C = v);
+
+document.getElementById('stamp').textContent = `Generated ${DATA.generatedAt} · ${runs.length} runs · ${datasets.length} datasets`;
+document.getElementById('cards').innerHTML = DATA.cards.map(c => `<div class="card"><div class="k">${c.k}</div><div class="v">${c.v}</div><div class="d">${c.d ?? ''}</div></div>`).join('');
+document.getElementById('findings').innerHTML = DATA.findings.map(f => `<li><span>${f}</span></li>`).join('');
+document.getElementById('method').innerHTML = DATA.method;
+document.getElementById('plate-note').textContent = DATA.plateNote ?? '';
+renderLegend(); renderPlates(); renderTable();
+window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', renderPlates);
+new MutationObserver(renderPlates).observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
+</script>
