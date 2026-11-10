@@ -35,10 +35,10 @@ export interface CoreferenceResult {
 const ID_BATCH = 90
 
 /**
- * Resolve document-wide entity coreference and (re)create document-scope parent
- * entities for every entity with two or more mentions. Single-mention entities
- * stay unparented (they are promoted on demand when a relationship needs them).
- * Idempotent: clears previous document-scope entities first. Never throws on
+ * Resolve document-wide entity coreference and (re)create a document-scope
+ * parent for every resolved entity — including names mentioned only once, so
+ * they appear in the document graph and can be linked across documents by
+ * scope promotion. Idempotent: clears previous document-scope entities first. Never throws on
  * model failure — falls back to identical-text grouping and reports `errors`.
  */
 export async function resolveDocumentCoreference(
@@ -104,7 +104,6 @@ export async function resolveDocumentCoreference(
       const type = [...members].sort((a, b) => b.count - a.count)[0].type
       return { label: e.label, type, ids }
     })
-    .filter((p) => p.ids.length >= 2)
   if (parents.length === 0) return { documentEntities: 0, chunkEntitiesLinked: 0, errors: result.errors }
 
   const inserted = await env.DB.batch<{ id: number }>(

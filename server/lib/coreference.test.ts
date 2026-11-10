@@ -41,13 +41,13 @@ describe('resolveDocumentCoreference', () => {
     })
     expect(requests).toHaveLength(1)
     expect(requests[0].messages[1].content).toContain('2 | PERSON | ×3 | 玄德\n')
-    expect(result).toEqual({ documentEntities: 2, chunkEntitiesLinked: 7, errors: [] })
+    expect(result).toEqual({ documentEntities: 3, chunkEntitiesLinked: 8, errors: [] })
     const ents = s.docEntities()
-    expect(ents.map((e) => e.label)).toEqual(['劉備', '關羽'])
+    expect(ents.map((e) => e.label)).toEqual(['劉備', '關羽', '張飛'])
     for (const id of [...s.ids.liubei, ...s.ids.xuande]) expect(s.parentOf(id)).toBe(ents[0].id)
     for (const id of [...s.ids.guanyu, ...s.ids.yunchang]) expect(s.parentOf(id)).toBe(ents[1].id)
-    // A single-mention entity stays unparented.
-    expect(s.parentOf(s.ids.zhangfei[0])).toBeNull()
+    // A name mentioned once is still an entity.
+    expect(s.parentOf(s.ids.zhangfei[0])).toBe(ents[2].id)
   })
 
   it('is idempotent', async () => {
@@ -55,15 +55,15 @@ describe('resolveDocumentCoreference', () => {
     const c = client('{"groups":[{"ids":[1,2],"label":"劉備"}]}')
     await resolveDocumentCoreference(s.doc, s.env, { client: c })
     await resolveDocumentCoreference(s.doc, s.env, { client: c })
-    // 劉備+玄德, and 關羽 (two identical mentions)
-    expect(s.docEntities().map((e) => e.label)).toEqual(['劉備', '關羽'])
+    expect(s.docEntities().map((e) => e.label)).toEqual(['劉備', '關羽', '雲長', '張飛'])
   })
 
   it('falls back to identical-text grouping when the model fails', async () => {
     const s = setup()
     const result = await resolveDocumentCoreference(s.doc, s.env, { client: client(new Error('down')) })
     expect(result.errors).toHaveLength(1)
-    expect(s.docEntities().map((e) => e.label)).toEqual(['玄德', '關羽'])
+    // Every distinct name becomes an entity; nothing is merged across names.
+    expect(s.docEntities().map((e) => e.label)).toEqual(['劉備', '玄德', '關羽', '雲長', '張飛'])
   })
 
   it('updates more than 100 mentions of one entity (D1 parameter cap)', async () => {
