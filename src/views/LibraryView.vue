@@ -558,6 +558,61 @@ async function submitImportUrl() {
     importingUrl.value = false
   }
 }
+
+// Import a Project Gutenberg book as a new root-level book collection, one
+// document per detected chapter.
+const gutenbergDialog = ref(false)
+const gutenbergUrl = ref('')
+const gutenbergScopeId = ref<number | null>(null)
+const importingGutenberg = ref(false)
+const gutenbergError = ref<string | null>(null)
+
+async function openGutenbergDialog() {
+  gutenbergUrl.value = ''
+  gutenbergScopeId.value = null
+  gutenbergError.value = null
+  gutenbergDialog.value = true
+  await fetchScopes()
+}
+
+async function submitGutenbergImport() {
+  const url = gutenbergUrl.value.trim()
+  if (!url) return
+
+  importingGutenberg.value = true
+  gutenbergError.value = null
+  uploadError.value = null
+  uploadSuccess.value = null
+
+  try {
+    const response = await fetch('/api/library/gutenberg', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url, knowledgeScopeId: gutenbergScopeId.value }),
+    })
+    const result = await response.json()
+    if (!response.ok) throw new Error(result.error || 'Import failed')
+
+    if (result.alreadyExists) {
+      uploadSuccess.value = `“${result.title}” is already in the library.`
+    } else {
+      const skipped = result.skippedChapters
+        ? ` (${result.skippedChapters} already in the library were skipped)`
+        : ''
+      uploadSuccess.value = `Imported “${result.title}” as ${result.documentIds.length} chapter document${result.documentIds.length === 1 ? '' : 's'}${skipped}. Processing started.`
+      await Promise.all([fetchDocuments(), fetchDirectoryTree()])
+    }
+    if (result.folderId !== null && result.folderId !== undefined) {
+      const node = `group-${result.folderId}`
+      if (!openFolders.value.includes(node)) openFolders.value = [...openFolders.value, node]
+    }
+    gutenbergDialog.value = false
+  } catch (err) {
+    gutenbergError.value = err instanceof Error ? err.message : 'Import failed'
+  } finally {
+    importingGutenberg.value = false
+  }
+}
 </script>
 
 <template>
@@ -702,6 +757,16 @@ async function submitImportUrl() {
           >
             Import from URL
           </v-btn>
+          <v-btn
+            class="ml-2"
+            variant="tonal"
+            color="primary"
+            prepend-icon="mdi-book-open-page-variant"
+            data-testid="import-gutenberg-button"
+            @click="openGutenbergDialog"
+          >
+            Import from Gutenberg
+          </v-btn>
         </div>
       </div>
 
@@ -809,6 +874,56 @@ async function submitImportUrl() {
             :disabled="!importUrl.trim()"
             data-testid="import-url-submit"
             @click="submitImportUrl"
+          >
+            Import
+          </v-btn>
+        </v-card-actions>
+      </v-card>
+    </v-dialog>
+
+    <!-- Import from Project Gutenberg Dialog -->
+    <v-dialog v-model="gutenbergDialog" max-width="560" :persistent="importingGutenberg">
+      <v-card>
+        <v-card-title>Import from Project Gutenberg</v-card-title>
+        <v-card-text>
+          <v-alert v-if="gutenbergError" type="error" density="compact" class="mb-4">
+            {{ gutenbergError }}
+          </v-alert>
+          <v-text-field
+            v-model="gutenbergUrl"
+            label="Book URL or ebook number"
+            placeholder="https://www.gutenberg.org/ebooks/23962"
+            variant="outlined"
+            autofocus
+            :disabled="importingGutenberg"
+            hint="The book is split into chapters (第一回, 第一章, CHAPTER I, …) and added as a new book collection at the root of the library, one document per chapter."
+            persistent-hint
+            class="mb-4"
+            data-testid="import-gutenberg-input"
+            @keyup.enter="submitGutenbergImport"
+          />
+          <v-autocomplete
+            v-model="gutenbergScopeId"
+            :items="scopeOptions"
+            item-title="display"
+            item-value="id"
+            label="Knowledge scope (optional)"
+            variant="outlined"
+            clearable
+            placeholder="None"
+            :disabled="importingGutenberg"
+            no-data-text="No knowledge scopes yet — create one in Knowledge Scopes"
+          />
+        </v-card-text>
+        <v-card-actions>
+          <v-spacer />
+          <v-btn :disabled="importingGutenberg" @click="gutenbergDialog = false">Cancel</v-btn>
+          <v-btn
+            color="primary"
+            :loading="importingGutenberg"
+            :disabled="!gutenbergUrl.trim()"
+            data-testid="import-gutenberg-submit"
+            @click="submitGutenbergImport"
           >
             Import
           </v-btn>

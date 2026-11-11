@@ -36,7 +36,7 @@ export interface OriginalFileInput {
  */
 export async function storeOriginalFile(
   input: OriginalFileInput,
-  env: Env
+  env: Pick<Env, 'DB' | 'DOCUMENTS'>
 ): Promise<UploadedFileInfo> {
   const { data: arrayBuffer, filename, mimetype } = input
   const contentHash = await computeContentHash(arrayBuffer)

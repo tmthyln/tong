@@ -13,6 +13,8 @@ import {
   WebpageImportError,
   type FetchedWebpage,
 } from '../lib/webpage'
+import { fetchGutenbergText, MAX_GUTENBERG_CHAPTERS, parseGutenbergId, parseGutenbergText, splitChapters } from '../lib/gutenberg'
+import { importBook } from '../lib/book-import'
 import { removeOverlaps } from '../lib/entity-extraction'
 import { getUserId, userType } from '../lib/auth'
 import { extractTermsFromText } from '../lib/text-terms'
@@ -98,7 +100,8 @@ libraryRoutes.get('/', async (c) => {
   // Fetch all documents with minimal info for tree display
   const docsResult = await c.env.DB.prepare(
     `SELECT id, title, original_doc_filename, parent_id, extracted_doc_char_count
-     FROM document ORDER BY COALESCE(title, original_doc_filename)`
+     FROM document
+     ORDER BY sort_index IS NULL, sort_index, COALESCE(title, original_doc_filename)`
   ).all<{
     id: number
     title: string | null
@@ -1414,6 +1417,59 @@ libraryRoutes.post('/document/url', async (c) => {
   return respondWithIngest(c, fileInfo, folderId, 'Webpage imported and processing started', {
     sourceUrl: page.url,
   })
+})
+
+// Import a Project Gutenberg book as a new root-level `book` collection, one
+// document per chapter (chapters are detected from heading lines; a book with
+// none becomes a single document).
+libraryRoutes.post('/gutenberg', async (c) => {
+  const body = await c.req
+    .json<{ url?: unknown; knowledgeScopeId?: unknown }>()
+    .catch(() => null)
+  if (!body || (typeof body.url !== 'string' && typeof body.url !== 'number') || !String(body.url).trim()) {
+    return c.json({ error: 'No Project Gutenberg URL or ebook number provided' }, 400)
+  }
+  const knowledgeScopeId =
+    body.knowledgeScopeId === null || body.knowledgeScopeId === undefined ? null : Number(body.knowledgeScopeId)
+  if (knowledgeScopeId !== null) {
+    if (!Number.isInteger(knowledgeScopeId)) return c.json({ error: 'Invalid knowledgeScopeId' }, 400)
+    const scope = await c.env.DB.prepare('SELECT id FROM knowledge_scope WHERE id = ?')
+      .bind(knowledgeScopeId)
+      .first()
+    if (!scope) return c.json({ error: 'Knowledge scope not found' }, 404)
+  }
+
+  let ebookId: number
+  let raw: string
+  try {
+    ebookId = parseGutenbergId(String(body.url))
+    raw = (await fetchGutenbergText(ebookId)).text
+  } catch (err) {
+    if (err instanceof WebpageImportError) return c.json({ error: err.message }, err.status)
+    throw err
+  }
+
+  const book = parseGutenbergText(raw)
+  const title = book.title ?? `Project Gutenberg #${ebookId}`
+  const chapters = splitChapters(book.body, title)
+  if (chapters.length === 0) {
+    return c.json({ error: 'The book has no text' }, 422)
+  }
+  if (chapters.length > MAX_GUTENBERG_CHAPTERS) {
+    return c.json({ error: `Too many chapters detected (${chapters.length})` }, 422)
+  }
+
+  const result = await importBook(c.env, {
+    title,
+    chapters,
+    sourceUrl: `https://www.gutenberg.org/ebooks/${ebookId}`,
+    knowledgeScopeId,
+  })
+  const summary = { ebookId, title, author: book.author, chapterCount: chapters.length }
+  if (result.alreadyExists) {
+    return c.json({ message: 'Book already imported', ...summary, ...result })
+  }
+  return c.json({ message: 'Book imported and processing started', ...summary, ...result }, 201)
 })
 
 export default libraryRoutes
