@@ -3,6 +3,8 @@
 // so it can be used as an agent self-tool. (The ingestion pipeline writes these
 // vectors via lib/embedding.ts.)
 
+import { embedText } from '../embedding'
+
 export interface ChunkSearchHit {
   chunkId: number
   documentId: number | null
@@ -24,8 +26,7 @@ export async function searchChunksByText(
   if (!query) return []
   const topK = Math.min(params.topK ?? 8, 20)
 
-  const embedding = await env.AI.run('@cf/google/embeddinggemma-300m', { text: query })
-  const vector = embedding.data?.[0]
+  const vector = await embedText(env, query, 'query')
   if (!vector) return []
 
   const queryResult = await env.CHUNK_VECTORS.query(vector, {

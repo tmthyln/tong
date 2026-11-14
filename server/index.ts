@@ -10,6 +10,7 @@ import knowledgeScopeRoutes from './routes/knowledge-scope'
 import authRoutes from './routes/auth'
 import preferencesRoutes from './routes/preferences'
 import devEvalRoutes from './routes/dev-eval'
+import { reembedStaleChunks } from './lib/reembed'
 
 export { IngestDocumentWorkflow } from './workflows/ingest-document'
 export { RefreshCedictWorkflow } from './workflows/refresh-cedict'
@@ -56,5 +57,20 @@ export default {
       if (agentResponse) return agentResponse
     }
     return app.fetch(request, env, ctx)
+  },
+
+  // Cron (wrangler.toml [triggers]): catch up stale chunk embeddings after an
+  // EMBEDDING_VERSION change. Errors are logged; the next tick retries.
+  async scheduled(_controller: ScheduledController, env: Env): Promise<void> {
+    try {
+      const { chunksEmbedded, chunksFailed, remaining } = await reembedStaleChunks(env)
+      if (chunksEmbedded > 0 || chunksFailed > 0) {
+        console.log(
+          `[reembed] embedded ${chunksEmbedded}, failed ${chunksFailed}, ${remaining} stale remaining`
+        )
+      }
+    } catch (err) {
+      console.error('[reembed] sweep failed', err)
+    }
   },
 }

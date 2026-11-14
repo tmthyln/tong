@@ -2,7 +2,7 @@ import { WorkflowEntrypoint, WorkflowStep, WorkflowEvent } from 'cloudflare:work
 import { extractContent, loadExtractedContent } from '../lib/extract-content'
 import { countChineseCharacters } from '../lib/chinese-utils'
 import { generateChunkIndices } from '../lib/chunking'
-import { embedAndStoreChunk } from '../lib/embedding'
+import { embedAndStoreChunk, EMBEDDING_MODEL } from '../lib/embedding'
 import {
   translateChunkMTBaseline,
   translateChunkLLMWithMTContext,
@@ -235,7 +235,7 @@ export class IngestDocumentWorkflow extends WorkflowEntrypoint<Env, IngestDocume
       startEnrichmentRun(this.env.DB, {
         documentId,
         kind: 'chunk_embedding',
-        model: null,
+        model: EMBEDDING_MODEL,
         params: { chunk_count: chunkIds.length },
         ontology: [],
       })

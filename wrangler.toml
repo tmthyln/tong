@@ -7,6 +7,11 @@ compatibility_date = "2025-09-27"
 compatibility_flags = ["nodejs_compat", "enable_ctx_exports"]
 main = "server/index.ts"
 
+# Low-priority background work (server/index.ts `scheduled`): re-embed chunks
+# whose embedding_version is stale, a small batch per tick.
+[triggers]
+crons = ["*/10 * * * *"]
+
 [limits]
 subrequests = 10_000_000
 

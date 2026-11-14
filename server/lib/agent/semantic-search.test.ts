@@ -6,7 +6,7 @@ function makeEnv(opts: {
   matches?: { id: string; score: number }[]
   chunks?: { id: number; source_document_id: number | null; content: string }[]
 }) {
-  const run = vi.fn().mockResolvedValue({ data: opts.vector ? [opts.vector] : [[0.1, 0.2]] })
+  const run = vi.fn().mockResolvedValue({ data: [{ index: 0, embedding: opts.vector ?? [0.1, 0.2] }] })
   const query = vi.fn().mockResolvedValue({ matches: opts.matches ?? [] })
   const all = vi.fn().mockResolvedValue({ results: opts.chunks ?? [] })
   const prepare = vi.fn(() => ({ bind: vi.fn(() => ({ all })) }))

@@ -17,6 +17,7 @@ import { fetchGutenbergText, MAX_GUTENBERG_CHAPTERS, parseGutenbergId, parseGute
 import { importBook } from '../lib/book-import'
 import { removeOverlaps } from '../lib/entity-extraction'
 import { getUserId, userType } from '../lib/auth'
+import { reembedDocument, type ReembedResult } from '../lib/reembed'
 import { extractTermsFromText } from '../lib/text-terms'
 import {
   promoteDocumentToScope,
@@ -903,6 +904,52 @@ libraryRoutes.put('/chunk/:chunkId/translation', async (c) => {
   }
 
   return c.json({ draftNumber, translator: userId, dateLastModified: now, created })
+})
+
+// POST /api/library/document/:id/reembed
+// Re-embeds the document's chunks with the current embedding model. Run after
+// EMBEDDING_MODEL changes; each run is recorded as a chunk_embedding enrichment.
+libraryRoutes.post('/document/:id/reembed', async (c) => {
+  if (userType(getUserId(c)) === 'public') {
+    return c.json({ error: 'Unauthorized' }, 401)
+  }
+  const id = parseInt(c.req.param('id'), 10)
+  if (isNaN(id)) return c.json({ error: 'Invalid document ID' }, 400)
+
+  const doc = await c.env.DB.prepare('SELECT id FROM document WHERE id = ?').bind(id).first()
+  if (!doc) return c.json({ error: 'Document not found' }, 404)
+
+  try {
+    return c.json(await reembedDocument(c.env, id))
+  } catch (err) {
+    return c.json({ error: err instanceof Error ? err.message : 'Re-embed failed' }, 500)
+  }
+})
+
+// POST /api/library/reembed
+// Re-embeds every document's chunks. Documents run sequentially; one failing
+// doesn't stop the rest. The response lists per-document outcomes.
+libraryRoutes.post('/reembed', async (c) => {
+  if (userType(getUserId(c)) === 'public') {
+    return c.json({ error: 'Unauthorized' }, 401)
+  }
+  const docs = await c.env.DB.prepare('SELECT id FROM document ORDER BY id').all<{ id: number }>()
+
+  const succeeded: ReembedResult[] = []
+  const failed: Array<{ documentId: number; error: string }> = []
+  for (const d of docs.results) {
+    try {
+      succeeded.push(await reembedDocument(c.env, d.id))
+    } catch (err) {
+      failed.push({ documentId: d.id, error: err instanceof Error ? err.message : String(err) })
+    }
+  }
+
+  return c.json({
+    documentsProcessed: succeeded.length,
+    chunksEmbedded: succeeded.reduce((n, r) => n + r.chunksEmbedded, 0),
+    failed,
+  })
 })
 
 libraryRoutes.get('/document/:id/enrichments', async (c) => {

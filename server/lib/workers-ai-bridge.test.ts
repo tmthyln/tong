@@ -2,8 +2,8 @@ import { describe, it, expect, vi } from 'vitest'
 import {
   handleWorkersAiRequest,
   TOPIC_NAMING_MODEL,
-  KEYPHRASE_EMBEDDING_MODEL,
 } from './workers-ai-bridge'
+import { EMBEDDING_MODEL } from './embedding'
 
 function makeEnv(run: ReturnType<typeof vi.fn>): Env {
   return { AI: { run } } as unknown as Env
@@ -59,15 +59,18 @@ describe('handleWorkersAiRequest /chat', () => {
 
 describe('handleWorkersAiRequest /embed', () => {
   it('batches texts by 90 and concatenates vectors', async () => {
-    const run = vi.fn().mockImplementation((_model: string, args: { text: string[] }) =>
-      Promise.resolve({ data: args.text.map(() => [0.1, 0.2]) })
+    const run = vi.fn().mockImplementation((_model: string, args: { input: string[] }) =>
+      Promise.resolve({ data: args.input.map((_, index) => ({ index, embedding: [0.1, 0.2] })) })
     )
     const texts = Array.from({ length: 200 }, (_, i) => `t${i}`)
     const res = await handleWorkersAiRequest(post('/embed', { texts }), makeEnv(run))
     const body = (await res.json()) as { vectors: number[][] }
     expect(body.vectors).toHaveLength(200)
     expect(run).toHaveBeenCalledTimes(3)
-    expect(run).toHaveBeenCalledWith(KEYPHRASE_EMBEDDING_MODEL, { text: texts.slice(0, 90) })
+    expect(run).toHaveBeenCalledWith(EMBEDDING_MODEL, {
+      input: texts.slice(0, 90).map((t) => `task: clustering | query: ${t}`),
+      dimensions: 768,
+    })
   })
 
   it('rejects missing texts', async () => {

@@ -1,8 +1,9 @@
 // Serves the container's virtual-host requests (http://workers-ai.tong/*)
 // from inside the Workers runtime, via UmapContainer's outbound interception.
 
+import { embedTexts } from './embedding'
+
 export const TOPIC_NAMING_MODEL = '@cf/moonshotai/kimi-k2.6'
-export const KEYPHRASE_EMBEDDING_MODEL = '@cf/google/embeddinggemma-300m'
 
 // Single owner of the virtual hostname: umap.ts uses it as the interception
 // key and injects it into the container as WORKERS_AI_BASE_URL.
@@ -28,10 +29,6 @@ interface ChatCompletionResponse {
 
 interface EmbedRequestBody {
   texts?: string[]
-}
-
-interface EmbeddingResponse {
-  data?: number[][]
 }
 
 type AiRun = (model: string, args: Record<string, unknown>) => Promise<unknown>
@@ -74,14 +71,10 @@ async function handleEmbed(request: Request, env: Env): Promise<Response> {
   if (!Array.isArray(body.texts) || body.texts.length === 0) {
     return Response.json({ error: 'texts required' }, { status: 400 })
   }
-  const batches: Promise<EmbeddingResponse>[] = []
+  const batches: Promise<number[][]>[] = []
   for (let i = 0; i < body.texts.length; i += EMBED_BATCH_SIZE) {
-    batches.push(
-      (env.AI.run as AiRun)(KEYPHRASE_EMBEDDING_MODEL, {
-        text: body.texts.slice(i, i + EMBED_BATCH_SIZE),
-      }) as Promise<EmbeddingResponse>
-    )
+    batches.push(embedTexts(env, body.texts.slice(i, i + EMBED_BATCH_SIZE), 'clustering'))
   }
   const results = await Promise.all(batches)
-  return Response.json({ vectors: results.flatMap((r) => r.data ?? []) })
+  return Response.json({ vectors: results.flat() })
 }

@@ -1,3 +1,5 @@
+import { embedText } from './embedding'
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const MODEL = '@cf/meta/llama-3.3-70b-instruct-fp8-fast' as any
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -47,18 +49,14 @@ async function fetchSimilarChunksWithTranslations(
   excludeIds: number[],
   env: Env
 ): Promise<Array<{ content: string; translation: string }>> {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  let embeddingResult: any
+  // Chunk-to-chunk similarity: embed as a document so it lands in the same
+  // space as the indexed chunks.
+  let vector: number[] | undefined
   try {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    embeddingResult = await (env.AI as any).run('@cf/google/embeddinggemma-300m', {
-      text: [content],
-    })
+    vector = await embedText(env, content, 'document')
   } catch {
     return []
   }
-
-  const vector = embeddingResult?.data?.[0]
   if (!vector) return []
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
