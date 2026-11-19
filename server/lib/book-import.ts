@@ -3,6 +3,7 @@
 // run through the normal ingestion workflow.
 import { storeOriginalFile, type UploadedFileInfo } from './documents'
 import { chapterDocument, chapterFilename, type BookChapter } from './gutenberg'
+import { mapLimit } from './map-limit'
 
 export interface BookImportInput {
   title: string
@@ -35,19 +36,6 @@ const STORE_CONCURRENCY = 6
 const INSERT_BATCH = 50
 // Workflow.createBatch accepts at most 100 instances per call.
 const WORKFLOW_BATCH = 100
-
-async function mapLimit<T, R>(items: T[], limit: number, fn: (item: T, i: number) => Promise<R>): Promise<R[]> {
-  const out = new Array<R>(items.length)
-  let next = 0
-  const worker = async () => {
-    while (next < items.length) {
-      const i = next++
-      out[i] = await fn(items[i], i)
-    }
-  }
-  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker))
-  return out
-}
 
 export async function importBook(env: BookImportEnv, input: BookImportInput): Promise<BookImportResult> {
   const { chapters } = input

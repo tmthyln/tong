@@ -18,6 +18,7 @@ import { importBook } from '../lib/book-import'
 import { removeOverlaps } from '../lib/entity-extraction'
 import { getUserId, userType } from '../lib/auth'
 import { reembedDocument, type ReembedResult } from '../lib/reembed'
+import { fetchVectorsByIds } from '../lib/chunk-vectors'
 import { extractTermsFromText } from '../lib/text-terms'
 import {
   promoteDocumentToScope,
@@ -298,22 +299,12 @@ libraryRoutes.get('/document/:id/similar', async (c) => {
     return c.json([])
   }
 
-  // 2. Batch-fetch all embeddings (max 20 IDs per call)
-  const vectorBatches: Array<{ id: string; values: number[] } | null> = []
-  for (let i = 0; i < chunkIds.length; i += 20) {
-    const batch = chunkIds.slice(i, i + 20).map(String)
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const result = await (c.env.CHUNK_VECTORS as any).getByIds(
-      batch,
-      { namespace: 'document' }
-    ) as Array<{ id: string; values: number[] } | null>
-    vectorBatches.push(...result)
-  }
-  const vectors = vectorBatches
-
-  const validVectors = vectors.filter(
-    (v): v is { id: string; values: number[] } => v != null && Array.isArray(v.values)
-  )
+  // 2. Fetch all embeddings (parallel batches of 20)
+  const vectorMap = await fetchVectorsByIds(c.env.CHUNK_VECTORS, chunkIds.map(String))
+  const validVectors = chunkIds.flatMap((id) => {
+    const values = vectorMap.get(String(id))
+    return values ? [{ id: String(id), values: Array.from(values) }] : []
+  })
 
   if (validVectors.length === 0) {
     return c.json([])

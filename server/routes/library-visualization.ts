@@ -1,7 +1,5 @@
 import { Hono } from 'hono'
-
-// VectorizeVector is a global type from worker-configuration.d.ts
-type VectorizeVector = { id: string; values: Float32Array | number[]; namespace?: string; metadata?: Record<string, unknown> }
+import { encodeVectorFrame, fetchVectorsByIds, VECTOR_FRAME_CONTENT_TYPE } from '../lib/chunk-vectors'
 
 interface ReduceResponse {
   coords: [number, number][]
@@ -21,9 +19,9 @@ export function isValidTopicsKey(key: string): boolean {
 
 export function computeDocMaxVectors(
   chunks: ChunkRow[],
-  vectorMap: Map<string, number[]>
-): Map<number, number[]> {
-  const docVectorMap = new Map<number, number[]>()
+  vectorMap: Map<string, Float32Array>
+): Map<number, Float32Array> {
+  const docVectorMap = new Map<number, Float32Array>()
   for (const chunk of chunks) {
     const vec = vectorMap.get(String(chunk.id))
     if (!vec) continue
@@ -61,18 +59,8 @@ libraryVisualizationRoutes.get('/', async (c) => {
 
   const allChunkIds = chunksResult.results.map((c) => String(c.id))
 
-  // 3. Batch-fetch vectors from Vectorize in batches of 20
-  const vectorMap = new Map<string, number[]>()
-  for (let i = 0; i < allChunkIds.length; i += 20) {
-    const batch = allChunkIds.slice(i, i + 20)
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const result = await (c.env.CHUNK_VECTORS as any).getByIds(batch, { namespace: 'document' }) as VectorizeVector[]
-    for (const match of result) {
-      if (match.values) {
-        vectorMap.set(match.id, Array.from(match.values))
-      }
-    }
-  }
+  // 3. Fetch vectors from Vectorize (parallel batches of 20)
+  const vectorMap = await fetchVectorsByIds(c.env.CHUNK_VECTORS, allChunkIds)
 
   // 4. Build ordered list of chunks that have vectors
   const chunksWithVectors = chunksResult.results.filter((chunk) => vectorMap.has(String(chunk.id)))
@@ -92,11 +80,11 @@ libraryVisualizationRoutes.get('/', async (c) => {
   }
 
   // 6. Call UMAP container; chunk vectors first so texts align with them
+  //    Binary float32 frame: ~1/5 the bytes of JSON numbers (container/app.py).
   const reduceResponse = await getUmapContainer(c.env).fetch('http://localhost/reduce', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      vectors: [...chunkVectors, ...docMaxVectors],
+    headers: { 'Content-Type': VECTOR_FRAME_CONTENT_TYPE },
+    body: encodeVectorFrame([...chunkVectors, ...docMaxVectors], {
       texts: chunksWithVectors.map((chunk) => chunk.content),
     }),
   })

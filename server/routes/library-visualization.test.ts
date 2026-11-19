@@ -21,14 +21,16 @@ describe('computeDocMaxVectors', () => {
       { id: 2, source_document_id: 10 },
       { id: 3, source_document_id: 20 },
     ]
-    const vectorMap = new Map<string, number[]>([
-      ['1', [1, 5]],
-      ['2', [3, 2]],
-      ['3', [0, 0]],
+    const vectorMap = new Map([
+      ['1', Float32Array.of(1, 5)],
+      ['2', Float32Array.of(3, 2)],
+      ['3', Float32Array.of(0, 0)],
     ])
     const result = computeDocMaxVectors(chunks, vectorMap)
-    expect(result.get(10)).toEqual([3, 5])
-    expect(result.get(20)).toEqual([0, 0])
+    expect(Array.from(result.get(10)!)).toEqual([3, 5])
+    expect(Array.from(result.get(20)!)).toEqual([0, 0])
+    // Copies, never aliases the chunk's own vector.
+    expect(vectorMap.get('1')).toEqual(Float32Array.of(1, 5))
   })
 
   it('skips chunks without vectors', () => {
