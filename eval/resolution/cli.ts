@@ -17,6 +17,7 @@ import { neuronsToUsd } from '../../server/lib/extraction/llm'
 import { extractEntitiesBatch, removeOverlaps, ENTITY_BATCH_CHUNKS, type NodeTypeInput } from '../../server/lib/entity-extraction'
 import { cachedClients, slug } from '../common/workers-ai'
 import { mapLimit } from '../../server/lib/map-limit'
+import { meanSd } from '../extraction/metrics'
 import { DATA_DIR, douluoRawDocs, loadCorpus, loadGold, sanguoRawDocs, surfaceForms, mentionContext, type Corpus, type Doc } from './datasets'
 import { COREF_STRATEGIES, LINK_STRATEGIES, E2E_STRATEGIES, type CorefOutput, type LinkOutput, type E2EOutput, type Cost } from './strategies'
 import { scoreCoref, scoreLinking, scoreE2E, type CorefScore, type LinkScore, type E2EScore } from './metrics'
@@ -87,9 +88,14 @@ export interface RunFile {
   output: CorefOutput | LinkOutput | E2EOutput
   /** Calls replayed from the response cache; latency is only meaningful when 0. */
   cacheHits?: number
+  /** Replicate index (0 = the base run). */
+  rep?: number
+  /** summarize(): run-to-run spread of F1 across this cell's replicates (rep-0 rows only). */
+  replicates?: { n: number; f1: { mean: number; sd: number } }
 }
 
 interface RunOpts {
+  rep?: number
   /** Recompute even if the run file exists (calls replay from the cache). */
   force?: boolean
   /** Bypass cache reads: real calls, for timing. */
@@ -101,11 +107,11 @@ type Task = 'coref' | 'link' | 'e2e'
 const corpusChars = (c: Corpus) => c.docs.reduce((n, d) => n + d.chunks.reduce((k, ch) => k + ch.content.length, 0), 0)
 
 async function runOne(corpusName: string, task: Task, strategyName: string, model: string, opts: RunOpts = {}): Promise<RunFile> {
-  const out = join(RESULTS_DIR, corpusName, `${task}__${strategyName}__${slug(model)}.json`)
+  const out = join(RESULTS_DIR, corpusName, `${task}__${strategyName}__${slug(model)}${opts.rep ? `__r${opts.rep}` : ''}.json`)
   if (!opts.force && !opts.fresh && existsSync(out)) return JSON.parse(readFileSync(out, 'utf8')) as RunFile
   const corpus = loadCorpus(corpusName)
   const gold = loadGold(corpusName)
-  const { client, rawRun, stats } = cachedClients({ dir: CACHE_DIR, fresh: opts.fresh })
+  const { client, rawRun, stats } = cachedClients({ dir: CACHE_DIR, fresh: opts.fresh, rep: opts.rep })
   const t0 = Date.now()
   let file: RunFile
   if (task === 'coref') {
@@ -125,6 +131,7 @@ async function runOne(corpusName: string, task: Task, strategyName: string, mode
     file = { corpus: corpusName, task, strategy: s.name, model, chars: corpusChars(corpus), cost: output.cost, score: scoreLinking(corpus, gold, output), output }
   }
   file.cacheHits = stats.hits
+  file.rep = opts.rep ?? 0
   mkdirSync(join(RESULTS_DIR, corpusName), { recursive: true })
   writeFileSync(out, JSON.stringify(file, null, 1))
   const sc = file.score as { f1: number; p: number; r: number }
@@ -160,7 +167,8 @@ function grid(): Array<[Task, string, string]> {
   return cells
 }
 
-function summarize(): RunFile[] {
+/** All run files, replicates included. */
+function runFiles(): RunFile[] {
   const all: RunFile[] = []
   for (const c of ['douluo', 'sanguo']) {
     const dir = join(RESULTS_DIR, c)
@@ -170,16 +178,39 @@ function summarize(): RunFile[] {
   return all
 }
 
+/** One row per cell (its rep-0 run), with replicate spread folded in. */
+function summarize(): RunFile[] {
+  const byCell = new Map<string, RunFile[]>()
+  for (const r of runFiles()) {
+    const k = `${r.corpus}|${r.task}|${r.strategy}|${r.model}`
+    byCell.set(k, [...(byCell.get(k) ?? []), r])
+  }
+  const rows: RunFile[] = []
+  for (const reps of byCell.values()) {
+    const base = reps.find((r) => !r.rep)
+    if (!base) continue
+    if (reps.length > 1) base.replicates = { n: reps.length, f1: meanSd(reps.map((r) => (r.score as { f1: number }).f1)) }
+    rows.push(base)
+  }
+  return rows
+}
+
 // ------------------------------------------------------------------ main
 
 async function main() {
   const [cmd, ...args] = process.argv.slice(2)
   const flags = new Set(args.filter((a) => a.startsWith('--')))
   const pos = args.filter((a) => !a.startsWith('--'))
+  const reps = Number(args.find((a) => a.startsWith('--reps='))?.slice('--reps='.length) ?? 1)
   if (cmd === 'build') return build(pos[0])
   if (cmd === 'forms') return dumpForms(pos[0])
   if (cmd === 'run') {
-    await runOne(pos[0], pos[1] as Task, pos[2], pos[3] ?? 'none', { force: flags.has('--force'), fresh: flags.has('--fresh') })
+    const files: RunFile[] = []
+    for (let rep = 0; rep < reps; rep++) files.push(await runOne(pos[0], pos[1] as Task, pos[2], pos[3] ?? 'none', { force: flags.has('--force'), fresh: flags.has('--fresh'), rep }))
+    if (reps > 1) {
+      const m = meanSd(files.map((f) => (f.score as { f1: number }).f1))
+      console.log(`${reps} replicates: F1 ${m.mean.toFixed(3)} ± ${m.sd.toFixed(3)} (mean ± sd)`)
+    }
     return
   }
   if (cmd === 'sweep') {
@@ -191,7 +222,7 @@ async function main() {
       // Spread models across workers so one model's rate limit doesn't stall the rest.
       await mapLimit(cells, Number(process.env.EVAL_CELL_CONCURRENCY ?? 4), async ([t, s, m]) => {
         try {
-          await runOne(c, t, s, m, { force: flags.has('--force'), fresh: flags.has('--fresh') })
+          for (let rep = 0; rep < reps; rep++) await runOne(c, t, s, m, { force: flags.has('--force'), fresh: flags.has('--fresh'), rep })
         } catch (err) {
           console.error(`FAILED ${c} ${t} ${s} ${m}: ${err}`)
         }
@@ -217,7 +248,7 @@ async function main() {
     return
   }
   if (cmd === 'rescore') {
-    // Recompute scores from stored outputs (after a metrics or gold change).
+    // Recompute scores from stored outputs (after a metrics or gold change), replicates included.
     for (const c of ['douluo', 'sanguo']) {
       const dir = join(RESULTS_DIR, c)
       if (!existsSync(dir)) continue
@@ -240,12 +271,12 @@ async function main() {
   if (cmd === 'table') {
     const rows = summarize().map((r) => {
       const s = r.score as { f1: number; p: number; r: number }
-      return [r.corpus, r.task, r.strategy, r.model.replace('@cf/', ''), s.f1.toFixed(3), s.p.toFixed(3), s.r.toFixed(3), ((neuronsToUsd(r.cost.neurons) / r.chars) * 1e6).toFixed(3), r.cost.calls, r.cost.errors].join('\t')
+      return [r.corpus, r.task, r.strategy, r.model.replace('@cf/', ''), s.f1.toFixed(3) + (r.replicates ? ` (reps: ${r.replicates.f1.mean.toFixed(3)} ±${r.replicates.f1.sd.toFixed(3)}, n=${r.replicates.n})` : ''), s.p.toFixed(3), s.r.toFixed(3), ((neuronsToUsd(r.cost.neurons) / r.chars) * 1e6).toFixed(3), r.cost.calls, r.cost.errors].join('\t')
     })
     console.log(rows.sort().join('\n'))
     return
   }
-  console.log('usage: cli.ts build|forms <corpus> | run <corpus> <coref|link> <strategy> <model> | sweep | report | table')
+  console.log('usage: cli.ts build|forms <corpus> | run <corpus> <coref|link|e2e> <strategy> <model> [--force] [--fresh] [--reps=N] | sweep [--reps=N] | report | table')
 }
 
 main().catch((err) => {

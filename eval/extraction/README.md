@@ -1,75 +1,25 @@
-# Extraction eval
 
-Local harness for the schema-driven extractor in `server/lib/extraction/`
-(entities, relations, classifications — GLiNER-style, one prompt per schema).
-It runs the exact production code against Cloudflare-hosted Workers AI models
-through the REST API, and measures quality against cost.
+
+## Noise
+
+Two sources, both reported:
+
+- **Passage sampling.** Every run prints a 95% bootstrap interval of each F1
+  over examples (`summary.json`: `ci`). With 12 douluo windows these are wide
+  (RE about ±0.1).
+- **Run to run.** Workers AI is not deterministic even at temperature 0.
+  `run … --reps=N` (and `sweep --reps=N`) runs N independent replicates of a
+  cell, each with its own cache keys (`__rK` run files), and prints mean ± sd;
+  `summary.json` folds them into the base row as `replicates`. Measured on
+  douluo with gemma-4-26b: NER sd ≈ 0.01, RE sd ≈ 0.04–0.05.
+
+To compare two cells, use the paired test, which cancels the per-passage
+difficulty both share and pools all replicates present for both:
 
 ```bash
-npm run eval:extraction -- silver            # once: build in-domain silver labels from local D1
-npm run eval:extraction -- sweep lit douluo  # model × strategy grid (resumable; cached per cell)
-npm run eval:extraction -- run lit joint-ner-re @cf/google/gemma-4-26b-a4b-it [--thinking] [--force]
-npm run eval:extraction -- report            # results/report.html — efficiency frontier
+npm run eval:extraction -- compare douluo app-pipeline@@cf/google/gemma-4-26b-a4b-it pipeline-ner-re@@cf/google/gemma-4-26b-a4b-it
+# NER Δ F1 +0.010  95% [-0.008, 0.027]  P(a > b) 0.86  (36 pairs, 3 reps)
+# RE  Δ F1 +0.026  95% [-0.047, 0.105]  P(a > b) 0.75  (36 pairs, 3 reps)
 ```
 
-Auth: `CLOUDFLARE_API_TOKEN` + `CLOUDFLARE_ACCOUNT_ID`, or an existing
-`npx wrangler login` (the harness reads/refreshes wrangler's OAuth token).
-
-## Datasets (not committed — `data/` and `results/` are gitignored)
-
-- **lit** — *A Discourse-Level Named Entity Recognition and Relation Extraction
-  Dataset for Chinese Literature Text* (Xu et al., 2017;
-  github.com/lancopku/Chinese-Literature-NER-RE-Dataset). Fetch the
-  `relation_extraction/{Testing,Validation}` brat files into `data/lit/`.
-  Passages of ~350 chars containing at least one relation; 40 sampled from
-  Testing (seeded). Its scheme annotates named *and* nominal mentions (7 coarse
-  types, pronouns dropped) and 9 relation types — a deliberately different
-  schema from the app's, to exercise the generic extractor.
-- **douluo** — 12 windows × 4 consecutive chunks of the novel in local D1, with
-  the app's live `node_type` / `edge_type` ontology. Labels are *silver*: a
-  per-chunk NER and closed-world RE majority vote (≥2 of 3) of kimi-k2.6,
-  deepseek-v4-pro and glm-5.3 with thinking enabled.
-
-## Scoring
-
-String level per passage: a mention is correct if (text, type) matches exactly;
-a relation if (head, type, tail) matches ("undirected" also reported). RE
-strategies other than `joint-ner-re` receive the gold entities (closed world),
-isolating relation quality from NER errors. Cost is the `neurons` Workers AI
-reports per call × $0.011/1000; latency is wall-clock per window with calls
-inside a window issued in parallel.
-
-## Strategies
-
-| name | calls per window | notes |
-|---|---|---|
-| `legacy-ner` | chunks × node types + chunks | frozen copy of the pre-refactor pipeline (`legacy/`) |
-| `legacy-re` | edge types | frozen pre-refactor pipeline |
-| `ner-per-label` / `re-per-label` | × labels | legacy structure with the new prompt |
-| `ner-all-labels` | chunks | all node types in one prompt |
-| `ner-all-labels-window` | 1 | all chunks of the window in one prompt (production's batching) |
-| `re-all-labels[-evidence]` | 1 | all edge types in one prompt (production uses evidence) |
-| `joint-ner-re` | 1 | entities and relations in one prompt |
-| `pipeline-ner-re` | 2 | window NER, then closed-world RE over the predicted entities |
-| `app-pipeline` | NER batches + RE windows | production ingest through production code (below) |
-
-`app-pipeline` calls the functions the ingest workflow calls, so production
-changes are measured without touching the harness: `extractEntitiesBatch`
-(`ENTITY_BATCH_CHUNKS` chunks per call), `removeOverlaps` per chunk,
-`relationWindows` with one `extractRelationships` call per window over that
-window's stored entities, then `anchorRelations`. Only anchored relations are
-scored, since production stores nothing else; the run log's `unanchored` counts
-the rest. Production's schema wording replaces the dataset's instructions, so it
-runs on `douluo` only in the sweep. Gold covers 4-chunk windows, so with
-production's 6-chunk relation windows each example is a single window: the
-cross-window overlap (chunks up to 2 apart sharing a window) is not exercised.
-
-## Response cache
-
-Every model call goes through `eval/common/cache.ts`, keyed by model, the exact
-Workers AI arguments production sends, and a replicate index, and stored under
-`data/cache/`. A stored call keeps its usage and latency, so a replayed run
-reports the same cost. `--force` recomputes a run (re-parsing, re-scoring) from
-the cache for free; `--fresh` bypasses cache reads for real calls (timing runs).
-A run file's `cacheHits` says how many calls were replayed: its wall-clock times
-mean nothing unless that is 0.
+Treat a difference whose paired interval spans 0 as a tie.

@@ -17,7 +17,7 @@ import { mapLimit } from '../../server/lib/map-limit'
 import { extract, type Mention, type Relation } from '../../server/lib/extraction/extract'
 import { DATA_DIR, loadAppSchema, loadDouluo, loadDouluoWindows, loadLit, type Dataset, type Example } from './datasets'
 import { getStrategy, STRATEGIES, type Prediction } from './strategies'
-import { addPrf, scoreMentions, scoreRelations, ZERO, type PRF } from './metrics'
+import { addPrf, bootstrapF1, meanSd, pairedBootstrap, scoreMentions, scoreRelations, ZERO, type Interval, type PRF } from './metrics'
 
 const RESULTS_DIR = join(process.cwd(), 'eval/extraction/results')
 const CACHE_DIR = join(DATA_DIR, 'cache')
@@ -37,9 +37,12 @@ export interface RunFile {
   examples: Array<{ id: string; chars: number; pred: Prediction; error?: string }>
   /** Calls replayed from the response cache; wall-clock latency is only meaningful when 0. */
   cacheHits?: number
+  /** Replicate index (0 = the base run); replicates are independent samples of the same cell. */
+  rep?: number
 }
 
 interface RunOpts {
+  rep?: number
   /** Recompute even if the run file exists (calls replay from the cache). */
   force?: boolean
   /** Bypass cache reads: real calls, for timing. */
@@ -48,12 +51,15 @@ interface RunOpts {
 
 // ------------------------------------------------------------------ run
 
+const runPath = (dataset: string, strategy: string, model: string, thinking: boolean, rep = 0) =>
+  join(RESULTS_DIR, dataset, `${strategy}__${slug(model)}${thinking ? '__thinking' : ''}${rep ? `__r${rep}` : ''}.json`)
+
 async function runOne(dataset: string, strategyName: string, model: string, thinking: boolean, opts: RunOpts = {}): Promise<RunFile> {
   const strategy = getStrategy(strategyName)
-  const out = join(RESULTS_DIR, dataset, `${strategy.name}__${slug(model)}${thinking ? '__thinking' : ''}.json`)
+  const out = runPath(dataset, strategy.name, model, thinking, opts.rep)
   if (!opts.force && !opts.fresh && existsSync(out)) return JSON.parse(readFileSync(out, 'utf8')) as RunFile
   const ds = loadDataset(dataset)
-  const { client, rawRun, stats } = cachedClients({ dir: CACHE_DIR, fresh: opts.fresh })
+  const { client, rawRun, stats } = cachedClients({ dir: CACHE_DIR, fresh: opts.fresh, rep: opts.rep })
   const t0 = Date.now()
   const examples = await mapLimit(ds.examples, Number(process.env.EVAL_EXAMPLE_CONCURRENCY ?? 6), async (ex) => {
     try {
@@ -64,18 +70,19 @@ async function runOne(dataset: string, strategyName: string, model: string, thin
       return { id: ex.id, chars: ex.text.length, pred: empty, error: String(err) }
     }
   })
-  const file: RunFile = { dataset, strategy: strategy.name, model, thinking, examples, cacheHits: stats.hits }
+  const file: RunFile = { dataset, strategy: strategy.name, model, thinking, examples, cacheHits: stats.hits, rep: opts.rep ?? 0 }
   mkdirSync(join(RESULTS_DIR, dataset), { recursive: true })
   writeFileSync(out, JSON.stringify(file, null, 1))
   const s = summarize(file, ds)
   console.log(
-    `${dataset.padEnd(7)} ${strategy.name.padEnd(24)} ${model.padEnd(42)} ${thinking ? 'T' : ' '}  ` +
-      `NER F1 ${fmt(s.ner?.typed.f1)}  RE F1 ${fmt(s.re?.strict.f1)}  $/1Mchar ${s.usdPerMChar.toFixed(2).padStart(7)}  calls ${s.calls}  err ${s.errors}  trunc ${s.truncated}${s.anchorDropped ? `  unanchored ${s.anchorDropped}` : ''}  ${((Date.now() - t0) / 1000).toFixed(0)}s${stats.hits ? `  (cached ${stats.hits}/${stats.hits + stats.misses})` : ''}`,
+    `${dataset.padEnd(7)} ${strategy.name.padEnd(24)} ${model.padEnd(42)} ${thinking ? 'T' : ' '}${opts.rep ? ` r${opts.rep}` : ''}  ` +
+      `NER F1 ${fmt(s.ner?.typed.f1)}${ci(s.ci.ner)}  RE F1 ${fmt(s.re?.strict.f1)}${ci(s.ci.re)}  $/1Mchar ${s.usdPerMChar.toFixed(2).padStart(7)}  calls ${s.calls}  err ${s.errors}  trunc ${s.truncated}${s.anchorDropped ? `  unanchored ${s.anchorDropped}` : ''}  ${((Date.now() - t0) / 1000).toFixed(0)}s${stats.hits ? `  (cached ${stats.hits}/${stats.hits + stats.misses})` : ''}`,
   )
   return file
 }
 
 const fmt = (x: number | undefined) => (x === undefined ? '  -  ' : x.toFixed(3))
+const ci = (i: Interval | undefined) => (i ? ` [${i.lo.toFixed(2)}–${i.hi.toFixed(2)}]` : '')
 
 // ------------------------------------------------------------------ summary
 
@@ -101,6 +108,26 @@ export interface Summary {
   truncated: number
   /** app-pipeline: model relations that anchoring could not place. */
   anchorDropped: number
+  rep: number
+  /** 95% bootstrap interval of the headline F1s over examples (passage-sampling noise). */
+  ci: { ner?: Interval; re?: Interval }
+  /** Run-to-run spread of the headline F1s across replicates of this cell (rep-0 rows only). */
+  replicates?: { n: number; ner?: { mean: number; sd: number }; re?: { mean: number; sd: number } }
+}
+
+/** Per-example headline scores (typed NER, strict RE), in dataset order. */
+export function perExample(f: RunFile, ds: Dataset): { ids: string[]; ner: PRF[]; re: PRF[] } {
+  const byId = new Map(f.examples.map((e) => [e.id, e]))
+  const strategy = getStrategy(f.strategy)
+  const out = { ids: [] as string[], ner: [] as PRF[], re: [] as PRF[] }
+  for (const g of ds.examples) {
+    const ex = byId.get(g.id)
+    if (!ex) continue
+    out.ids.push(g.id)
+    if (strategy.tasks.includes('ner')) out.ner.push(scoreMentions(ex.pred.mentions, g.gold.mentions).typed)
+    if (strategy.tasks.includes('re')) out.re.push(scoreRelations(ex.pred.relations, g.gold.relations).strict)
+  }
+  return out
 }
 
 export function summarize(f: RunFile, ds: Dataset): Summary {
@@ -134,6 +161,7 @@ export function summarize(f: RunFile, ds: Dataset): Summary {
   }
   walls.sort((a, b) => a - b)
   const usd = neuronsToUsd(neurons)
+  const pe = perExample(f, ds)
   return {
     dataset: f.dataset,
     strategy: f.strategy,
@@ -155,9 +183,14 @@ export function summarize(f: RunFile, ds: Dataset): Summary {
     errors,
     truncated,
     anchorDropped,
+    rep: f.rep ?? 0,
+    ci: { ner: pe.ner.length ? bootstrapF1(pe.ner) : undefined, re: pe.re.length ? bootstrapF1(pe.re) : undefined },
   }
 }
 
+const cellKey = (r: { dataset: string; strategy: string; model: string; thinking: boolean }) => `${r.dataset}|${r.strategy}|${r.model}|${r.thinking}`
+
+/** One row per cell (its rep-0 run), with replicate spread folded in when replicates exist. */
 function writeSummary(): Summary[] {
   const all: Summary[] = []
   for (const dataset of existsSync(RESULTS_DIR) ? readdirSync(RESULTS_DIR) : []) {
@@ -168,8 +201,62 @@ function writeSummary(): Summary[] {
       all.push(summarize(JSON.parse(readFileSync(join(dir, f), 'utf8')) as RunFile, ds))
     }
   }
-  writeFileSync(join(RESULTS_DIR, 'summary.json'), JSON.stringify(all, null, 1))
-  return all
+  const byCell = new Map<string, Summary[]>()
+  for (const r of all) byCell.set(cellKey(r), [...(byCell.get(cellKey(r)) ?? []), r])
+  const rows: Summary[] = []
+  for (const reps of byCell.values()) {
+    const base = reps.find((r) => r.rep === 0)
+    if (!base) continue
+    if (reps.length > 1) {
+      const spread = (xs: Array<number | undefined>) => (xs.every((x) => x !== undefined) ? meanSd(xs as number[]) : undefined)
+      base.replicates = { n: reps.length, ner: spread(reps.map((r) => r.ner?.typed.f1)), re: spread(reps.map((r) => r.re?.strict.f1)) }
+    }
+    rows.push(base)
+  }
+  writeFileSync(join(RESULTS_DIR, 'summary.json'), JSON.stringify(rows, null, 1))
+  return rows
+}
+
+/** Every replicate file of a cell present on disk, rep 0 first. */
+function replicateFiles(dataset: string, strategy: string, model: string, thinking: boolean): RunFile[] {
+  const out: RunFile[] = []
+  for (let rep = 0; existsSync(runPath(dataset, strategy, model, thinking, rep)); rep++) out.push(JSON.parse(readFileSync(runPath(dataset, strategy, model, thinking, rep), 'utf8')) as RunFile)
+  return out
+}
+
+/**
+ * Paired comparison of two cells (`strategy@model`) on the same examples: F1
+ * delta with a paired-bootstrap interval. Replicates present for both cells are
+ * pooled as extra (rep, example) pairs, so run-to-run noise is included.
+ */
+function compare(dataset: string, a: string, b: string, thinking: boolean) {
+  const ds = loadDataset(dataset)
+  const parse = (cell: string) => {
+    const at = cell.indexOf('@')
+    if (at < 0) throw new Error(`expected strategy@model, got ${cell}`)
+    return { strategy: cell.slice(0, at), model: cell.slice(at + 1) }
+  }
+  const [ca, cb] = [parse(a), parse(b)]
+  const fa = replicateFiles(dataset, ca.strategy, ca.model, thinking)
+  const fb = replicateFiles(dataset, cb.strategy, cb.model, thinking)
+  const reps = Math.min(fa.length, fb.length)
+  if (!reps) throw new Error('both cells need a run file (run them first)')
+  for (const task of ['ner', 're'] as const) {
+    const xa: PRF[] = [], xb: PRF[] = []
+    for (let r = 0; r < reps; r++) {
+      const [pa, pb] = [perExample(fa[r], ds), perExample(fb[r], ds)]
+      if (!pa[task].length || !pb[task].length) continue
+      // Align on the examples both runs scored.
+      const ib = new Map(pb.ids.map((id, i) => [id, i]))
+      pa.ids.forEach((id, i) => {
+        const j = ib.get(id)
+        if (j !== undefined) (xa.push(pa[task][i]), xb.push(pb[task][j]))
+      })
+    }
+    if (!xa.length) continue
+    const d = pairedBootstrap(xa, xb)
+    console.log(`${task.toUpperCase().padEnd(3)} Δ F1 ${d.delta >= 0 ? '+' : ''}${d.delta.toFixed(3)}  95% [${d.lo.toFixed(3)}, ${d.hi.toFixed(3)}]  P(a > b) ${d.pBetter.toFixed(2)}  (${xa.length} pairs, ${reps} rep${reps > 1 ? 's' : ''})`)
+  }
 }
 
 // ------------------------------------------------------------------ silver labels (douluo)
@@ -279,8 +366,20 @@ async function main() {
   const flags = new Set(args.filter((a) => a.startsWith('--')))
   const pos = args.filter((a) => !a.startsWith('--'))
   if (cmd === 'silver') return buildSilver()
+  const reps = Number(args.find((a) => a.startsWith('--reps='))?.slice('--reps='.length) ?? 1)
   if (cmd === 'run') {
-    await runOne(pos[0], pos[1], pos[2], flags.has('--thinking'), { force: flags.has('--force'), fresh: flags.has('--fresh') })
+    const files: RunFile[] = []
+    for (let rep = 0; rep < reps; rep++) files.push(await runOne(pos[0], pos[1], pos[2], flags.has('--thinking'), { force: flags.has('--force'), fresh: flags.has('--fresh'), rep }))
+    if (reps > 1) {
+      const ds = loadDataset(pos[0])
+      const ss = files.map((f) => summarize(f, ds))
+      const line = (xs: Array<number | undefined>) => (xs.every((x) => x !== undefined) ? ((m) => `${m.mean.toFixed(3)} ± ${m.sd.toFixed(3)}`)(meanSd(xs as number[])) : '-')
+      console.log(`${reps} replicates: NER F1 ${line(ss.map((s) => s.ner?.typed.f1))}  RE F1 ${line(ss.map((s) => s.re?.strict.f1))}  (mean ± sd)`)
+    }
+    return
+  }
+  if (cmd === 'compare') {
+    compare(pos[0], pos[1], pos[2], flags.has('--thinking'))
     return
   }
   if (cmd === 'sweep') {
@@ -291,7 +390,7 @@ async function main() {
       if (flags.has('--reverse')) cells = cells.reverse()
       await mapLimit(cells, flags.has('--slow') ? 1 : 4, async ([s, m, t]) => {
         try {
-          await runOne(d, s, m, t, { force: flags.has('--force'), fresh: flags.has('--fresh') })
+          for (let rep = 0; rep < reps; rep++) await runOne(d, s, m, t, { force: flags.has('--force'), fresh: flags.has('--fresh'), rep })
         } catch (err) {
           console.error(`FAILED ${d} ${s} ${m}: ${err}`)
         }
@@ -318,7 +417,7 @@ async function main() {
     console.log(`${all.length} runs summarized → ${join(RESULTS_DIR, 'summary.json')}`)
     return
   }
-  console.log(`usage: cli.ts silver | run <dataset> <strategy> <model> [--thinking] [--force] [--fresh] | sweep [datasets] | summary\nstrategies: ${STRATEGIES.map((s) => s.name).join(', ')}`)
+  console.log(`usage: cli.ts silver | run <dataset> <strategy> <model> [--thinking] [--force] [--fresh] [--reps=N] | compare <dataset> <strategy@model> <strategy@model> | sweep [datasets] [--reps=N] | summary\nstrategies: ${STRATEGIES.map((s) => s.name).join(', ')}`)
 }
 
 main().catch((err) => {
