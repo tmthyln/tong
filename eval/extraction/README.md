@@ -46,7 +46,20 @@ inside a window issued in parallel.
 | `legacy-ner` | chunks × node types + chunks | frozen copy of the pre-refactor pipeline (`legacy/`) |
 | `legacy-re` | edge types | frozen pre-refactor pipeline |
 | `ner-per-label` / `re-per-label` | × labels | legacy structure with the new prompt |
-| `ner-all-labels` | chunks | all node types in one prompt (production) |
-| `ner-all-labels-window` | 1 | all chunks of the window in one prompt |
+| `ner-all-labels` | chunks | all node types in one prompt |
+| `ner-all-labels-window` | 1 | all chunks of the window in one prompt (production's batching) |
 | `re-all-labels[-evidence]` | 1 | all edge types in one prompt (production uses evidence) |
 | `joint-ner-re` | 1 | entities and relations in one prompt |
+| `pipeline-ner-re` | 2 | window NER, then closed-world RE over the predicted entities |
+| `app-pipeline` | NER batches + RE windows | production ingest through production code (below) |
+
+`app-pipeline` calls the functions the ingest workflow calls, so production
+changes are measured without touching the harness: `extractEntitiesBatch`
+(`ENTITY_BATCH_CHUNKS` chunks per call), `removeOverlaps` per chunk,
+`relationWindows` with one `extractRelationships` call per window over that
+window's stored entities, then `anchorRelations`. Only anchored relations are
+scored, since production stores nothing else; the run log's `unanchored` counts
+the rest. Production's schema wording replaces the dataset's instructions, so it
+runs on `douluo` only in the sweep. Gold covers 4-chunk windows, so with
+production's 6-chunk relation windows each example is a single window: the
+cross-window overlap (chunks up to 2 apart sharing a window) is not exercised.

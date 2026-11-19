@@ -5,8 +5,11 @@
  * server/lib/extraction.
  */
 import { extract, type Mention, type Relation } from '../../server/lib/extraction/extract'
-import { addUsage, EMPTY_USAGE, normalizeCompletion, type ChatUsage, type LlmClient } from '../../server/lib/extraction/llm'
+import { addUsage, EMPTY_USAGE, normalizeCompletion, type ChatResult, type ChatUsage, type LlmClient } from '../../server/lib/extraction/llm'
 import type { ExtractionSchema } from '../../server/lib/extraction/schema'
+import { ENTITY_BATCH_CHUNKS, extractEntitiesBatch, removeOverlaps, type ExtractedEntity, type NodeTypeInput } from '../../server/lib/entity-extraction'
+import { extractRelationships, relationWindows, type EdgeTypeInput } from '../../server/lib/relationship-extraction'
+import { anchorRelations } from '../../server/lib/relationship-anchoring'
 import { extractEntitiesForNodeTypesWithUsage, deduplicateEntitiesLLM, ENTITY_EXTRACTION_MODEL } from './legacy/entity-extraction'
 import { extractRelationshipsForEdgeTypeWithUsage } from './legacy/relationship-extraction'
 import type { Example } from './datasets'
@@ -23,6 +26,8 @@ export interface Prediction {
   callMs: number
   truncated: number
   errorSample?: string
+  /** app-pipeline: relations the model returned that anchoring could not place (never stored). */
+  anchorDropped?: number
 }
 
 export interface StrategyCtx {
@@ -178,6 +183,99 @@ const pipeline: Strategy = {
     }),
 }
 
+// ------------------------------------------------------------ production, end to end
+
+/** Wraps a client, recording every call's result (or failure) for cost accounting. */
+export function recordingClient(inner: LlmClient) {
+  const runs: ChatResult[] = []
+  let failed = 0
+  const client: LlmClient = {
+    async chat(req) {
+      try {
+        const r = await inner.chat(req)
+        runs.push(r)
+        return r
+      } catch (err) {
+        failed++
+        throw err
+      }
+    },
+  }
+  const totals = () => ({
+    usage: runs.reduce((u, r) => addUsage(u, r.usage), EMPTY_USAGE),
+    calls: runs.length + failed,
+    errors: failed,
+    callMs: runs.reduce((s, r) => s + r.latencyMs, 0),
+    truncated: runs.filter((r) => r.finishReason === 'length').length,
+  })
+  return { client, totals }
+}
+
+export const toNodeTypes = (s: ExtractionSchema): NodeTypeInput[] =>
+  (s.entities ?? []).map((e) => ({ name: e.name, definition: e.description ?? '', examples: e.examples ?? [] }))
+export const toEdgeTypes = (s: ExtractionSchema): EdgeTypeInput[] =>
+  (s.relations ?? []).map((r) => ({ name: r.name, reverseName: null, definition: r.description ?? '', examples: r.examples ?? [] }))
+
+/**
+ * The ingest workflow's extraction, run through the production functions
+ * themselves (server/workflows/ingest-document.ts, phases 4 and 6):
+ *  1. entities: `extractEntitiesBatch` over ENTITY_BATCH_CHUNKS chunks per call,
+ *     then `removeOverlaps` per chunk — the rows production stores;
+ *  2. relations: `relationWindows` over the chunks, one `extractRelationships`
+ *     call per window given that window's stored entity rows;
+ *  3. `anchorRelations` onto the stored mentions. A relation production cannot
+ *     anchor is never stored, so only anchored relations are scored
+ *     (`anchorDropped` counts the rest).
+ * Production's schema wording (nodeTypesToSchema) replaces the dataset's
+ * instructions, so on `lit` this measures production's prompt, not the benchmark's.
+ */
+const appPipeline: Strategy = {
+  name: 'app-pipeline',
+  description: 'Production ingest, end to end: batched NER + removeOverlaps, windowed RE, anchoring (production code)',
+  tasks: ['ner', 're'],
+  run: (ex, ctx) =>
+    timed(async () => {
+      const { client, totals } = recordingClient(ctx.client)
+      const opts = { client, ...base(ctx) }
+      const env = {} as Env // unused: every call goes through `client`
+      const nodeTypes = toNodeTypes(ctx.schema)
+      const edgeTypes = toEdgeTypes(ctx.schema)
+
+      const batches: number[][] = []
+      for (let i = 0; i < ex.parts.length; i += ENTITY_BATCH_CHUNKS) batches.push(ex.parts.map((_, j) => j).slice(i, i + ENTITY_BATCH_CHUNKS))
+      const perChunk: ExtractedEntity[][] = new Array(ex.parts.length)
+      await Promise.all(
+        batches.map(async (idx) => {
+          const raw = await extractEntitiesBatch(idx.map((i) => ex.parts[i]), nodeTypes, env, opts)
+          idx.forEach((chunk, k) => (perChunk[chunk] = removeOverlaps(raw[k])))
+        }),
+      )
+      let nextId = 0
+      const rows = perChunk.flatMap((ents, chunk) => ents.map((e) => ({ ...e, id: nextId++, chunk })))
+      const textOf = new Map(rows.map((r) => [r.id, r.text]))
+
+      let anchorDropped = 0
+      const relations = new Map<string, Relation>()
+      await Promise.all(
+        relationWindows(ex.parts.length).map(async ([start, end]) => {
+          const inWindow = rows.filter((r) => r.chunk >= start && r.chunk < end)
+          const rels = await extractRelationships(ex.parts.slice(start, end).join('\n'), inWindow, edgeTypes, env, opts)
+          const mentions = inWindow.map((r) => ({ id: r.id, text: r.text, chunkId: r.chunk, chunkOrder: r.chunk, startIndex: r.startIndex }))
+          const anchored = anchorRelations(rels, mentions)
+          const anchoredKeys = new Set(anchored.map((a) => `${textOf.get(a.fromEntityId)}|${a.edgeType}|${textOf.get(a.toEntityId)}`))
+          anchorDropped += rels.filter((r) => !anchoredKeys.has(`${r.fromText}|${r.edgeType}|${r.toText}`)).length
+          for (const a of anchored) {
+            const head = textOf.get(a.fromEntityId)!
+            const tail = textOf.get(a.toEntityId)!
+            relations.set(`${head}|${a.edgeType}|${tail}`, { head, label: a.edgeType, tail, evidence: a.explanation })
+          }
+        }),
+      )
+      const mentions = uniqMentions(rows.map((r) => ({ text: r.text, label: r.nodeType })))
+      return { mentions, relations: [...relations.values()], anchorDropped, ...totals() }
+    }),
+}
+
 // ------------------------------------------------------------ legacy baselines
 
 /** Wrap rawRun as a fake Env whose AI.run records usage of every call. */
@@ -250,7 +348,7 @@ const legacyRe: Strategy = {
     }),
 }
 
-export const STRATEGIES: Strategy[] = [legacyNer, legacyRe, nerPerLabel, nerJoint, nerWindow, rePerLabel, reAll(false), reAll(true), jointNerRe, pipeline]
+export const STRATEGIES: Strategy[] = [legacyNer, legacyRe, nerPerLabel, nerJoint, nerWindow, rePerLabel, reAll(false), reAll(true), jointNerRe, pipeline, appPipeline]
 
 export function getStrategy(name: string): Strategy {
   const s = STRATEGIES.find((s) => s.name === name)

@@ -59,7 +59,7 @@ async function runOne(dataset: string, strategyName: string, model: string, thin
   const s = summarize(file, ds)
   console.log(
     `${dataset.padEnd(7)} ${strategy.name.padEnd(24)} ${model.padEnd(42)} ${thinking ? 'T' : ' '}  ` +
-      `NER F1 ${fmt(s.ner?.typed.f1)}  RE F1 ${fmt(s.re?.strict.f1)}  $/1Mchar ${s.usdPerMChar.toFixed(2).padStart(7)}  calls ${s.calls}  err ${s.errors}  trunc ${s.truncated}  ${((Date.now() - t0) / 1000).toFixed(0)}s`,
+      `NER F1 ${fmt(s.ner?.typed.f1)}  RE F1 ${fmt(s.re?.strict.f1)}  $/1Mchar ${s.usdPerMChar.toFixed(2).padStart(7)}  calls ${s.calls}  err ${s.errors}  trunc ${s.truncated}${s.anchorDropped ? `  unanchored ${s.anchorDropped}` : ''}  ${((Date.now() - t0) / 1000).toFixed(0)}s`,
   )
   return file
 }
@@ -88,13 +88,15 @@ export interface Summary {
   p95WallMs: number
   errors: number
   truncated: number
+  /** app-pipeline: model relations that anchoring could not place. */
+  anchorDropped: number
 }
 
 export function summarize(f: RunFile, ds: Dataset): Summary {
   const strategy = getStrategy(f.strategy)
   const gold = new Map(ds.examples.map((e) => [e.id, e]))
   let nerT = ZERO, nerU = ZERO, reS = ZERO, reU = ZERO
-  let neurons = 0, pt = 0, ct = 0, calls = 0, chars = 0, errors = 0, truncated = 0
+  let neurons = 0, pt = 0, ct = 0, calls = 0, chars = 0, errors = 0, truncated = 0, anchorDropped = 0
   const walls: number[] = []
   for (const ex of f.examples) {
     const g = gold.get(ex.id)
@@ -116,6 +118,7 @@ export function summarize(f: RunFile, ds: Dataset): Summary {
     chars += ex.chars
     errors += ex.pred.errors + (ex.error ? 1 : 0)
     truncated += ex.pred.truncated
+    anchorDropped += ex.pred.anchorDropped ?? 0
     walls.push(ex.pred.wallMs)
   }
   walls.sort((a, b) => a - b)
@@ -140,6 +143,7 @@ export function summarize(f: RunFile, ds: Dataset): Summary {
     p95WallMs: walls[Math.floor(walls.length * 0.95)] ?? 0,
     errors,
     truncated,
+    anchorDropped,
   }
 }
 
@@ -250,6 +254,8 @@ function grid(dataset: string): Array<[string, string, boolean]> {
   }
   for (const m of ['@cf/moonshotai/kimi-k2.6', '@cf/google/gemma-4-26b-a4b-it', '@cf/zai-org/glm-5.3-flash', '@cf/qwen/qwen3.8-27b', '@cf/deepseek-ai/deepseek-v4.1-flash-1017']) {
     cells.push(['re-all-labels-evidence', m, false], ['pipeline-ner-re', m, false])
+    // Production's own code path; its schema wording is production's, so in-domain only.
+    if (dataset === 'douluo') cells.push(['app-pipeline', m, false])
   }
   // Thinking mode is deliberately out of the grid: ~17–390× the cost for this task (see report-notes); `run --thinking` still works.
   return cells
