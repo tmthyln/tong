@@ -4,6 +4,7 @@ import {
   TOPIC_NAMING_MODEL,
 } from './workers-ai-bridge'
 import { EMBEDDING_MODEL } from './embedding'
+import { buildRunArgs } from './extraction/llm'
 
 function makeEnv(run: ReturnType<typeof vi.fn>): Env {
   return { AI: { run } } as unknown as Env
@@ -18,7 +19,7 @@ function post(path: string, body: unknown): Request {
 }
 
 describe('handleWorkersAiRequest /chat', () => {
-  it('forwards messages to kimi and returns choices content', async () => {
+  it('forwards messages to the naming model and returns choices content', async () => {
     const run = vi.fn().mockResolvedValue({
       choices: [{ message: { content: '{"topic_name": "唐诗"}' } }],
     })
@@ -28,12 +29,15 @@ describe('handleWorkersAiRequest /chat', () => {
     )
     expect(res.status).toBe(200)
     expect(await res.json()).toEqual({ content: '{"topic_name": "唐诗"}' })
-    expect(run).toHaveBeenCalledWith(TOPIC_NAMING_MODEL, {
-      messages: [{ role: 'user', content: 'hi' }],
-      temperature: 0.2,
-      max_completion_tokens: 2048,
-      chat_template_kwargs: { thinking: false },
-    })
+    expect(TOPIC_NAMING_MODEL).toBe('@cf/zai-org/glm-5.3-flash')
+    // Same arguments the eval scored: thinking off, no JSON mode.
+    expect(run).toHaveBeenCalledWith(
+      TOPIC_NAMING_MODEL,
+      buildRunArgs({ model: TOPIC_NAMING_MODEL, messages: [{ role: 'user', content: 'hi' }], temperature: 0.2, maxCompletionTokens: 2048, json: false })
+    )
+    const args = run.mock.calls[0][1]
+    expect(args.response_format).toBeUndefined()
+    expect(args.chat_template_kwargs).toEqual({ thinking: false, enable_thinking: false })
   })
 
   it('falls back to .response and applies default params', async () => {
@@ -43,12 +47,7 @@ describe('handleWorkersAiRequest /chat', () => {
       makeEnv(run)
     )
     expect(await res.json()).toEqual({ content: 'plain' })
-    expect(run).toHaveBeenCalledWith(TOPIC_NAMING_MODEL, {
-      messages: [{ role: 'user', content: 'hi' }],
-      temperature: 0.4,
-      max_completion_tokens: 1024,
-      chat_template_kwargs: { thinking: false },
-    })
+    expect(run.mock.calls[0][1]).toMatchObject({ temperature: 0.4, max_completion_tokens: 1024 })
   })
 
   it('rejects missing messages', async () => {
@@ -93,7 +92,7 @@ describe('handleWorkersAiRequest routing', () => {
     expect(res.status).toBe(405)
   })
 
-  it('500s when AI.run throws', async () => {
+  it('500s when AI.run keeps throwing', async () => {
     const run = vi.fn().mockRejectedValue(new Error('boom'))
     const res = await handleWorkersAiRequest(
       post('/chat', { messages: [{ role: 'user', content: 'hi' }] }),

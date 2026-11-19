@@ -35,7 +35,7 @@ class WorkersAIClient:
 
 
 class WorkersAINamer(LLMWrapper):
-    """Toponymy LLM wrapper backed by kimi-k2.6 via the Workers AI bridge."""
+    """Toponymy LLM wrapper; the Workers AI bridge picks the model (TOPIC_NAMING_MODEL)."""
 
     supports_system_prompts = True
     # Toponymy defaults topic-name calls to 128 tokens, which truncates JSON

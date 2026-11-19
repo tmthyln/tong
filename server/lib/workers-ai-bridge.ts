@@ -2,8 +2,14 @@
 // from inside the Workers runtime, via UmapContainer's outbound interception.
 
 import { embedTexts } from './embedding'
+import { workersAiClient } from './extraction/llm'
 
-export const TOPIC_NAMING_MODEL = '@cf/moonshotai/kimi-k2.6'
+/**
+ * Names the document map's topic clusters. Chosen by the label-quality eval
+ * (eval/topics): best on descriptive (4.47 vs kimi-k2.6's 4.33) and fully
+ * faithful labels (0.87 vs 0.79), as discriminative, at ~1/6 the cost per run.
+ */
+export const TOPIC_NAMING_MODEL = '@cf/zai-org/glm-5.3-flash'
 
 // Single owner of the virtual hostname: umap.ts uses it as the interception
 // key and injects it into the container as WORKERS_AI_BASE_URL.
@@ -12,7 +18,7 @@ export const WORKERS_AI_VIRTUAL_HOST = 'workers-ai.tong'
 const EMBED_BATCH_SIZE = 90
 
 interface ChatMessage {
-  role: string
+  role: 'system' | 'user' | 'assistant'
   content: string
 }
 
@@ -22,16 +28,9 @@ interface ChatRequestBody {
   max_tokens?: number
 }
 
-interface ChatCompletionResponse {
-  choices?: Array<{ message?: { content?: string } }>
-  response?: string
-}
-
 interface EmbedRequestBody {
   texts?: string[]
 }
-
-type AiRun = (model: string, args: Record<string, unknown>) => Promise<unknown>
 
 export async function handleWorkersAiRequest(request: Request, env: Env): Promise<Response> {
   if (request.method !== 'POST') {
@@ -53,16 +52,16 @@ async function handleChat(request: Request, env: Env): Promise<Response> {
   if (!Array.isArray(body.messages) || body.messages.length === 0) {
     return Response.json({ error: 'messages required' }, { status: 400 })
   }
-  const result = (await (env.AI.run as AiRun)(TOPIC_NAMING_MODEL, {
-    messages: body.messages,
+  // Same call shape as the eval (thinking off, plain-text answer); token-budget
+  // policy lives in the Python caller (workers_ai.py).
+  const result = await workersAiClient(env.AI, { attempts: 2 }).chat({
+    model: TOPIC_NAMING_MODEL,
+    messages: body.messages as ChatMessage[],
     temperature: body.temperature ?? 0.4,
-    // kimi-k2.6 ignores max_tokens; it wants max_completion_tokens. Thinking
-    // mode must be off or reasoning eats the budget before the JSON answer.
-    // Token-budget policy lives in the Python caller (workers_ai.py).
-    max_completion_tokens: body.max_tokens ?? 1024,
-    chat_template_kwargs: { thinking: false },
-  })) as ChatCompletionResponse
-  const content = result.choices?.[0]?.message?.content ?? result.response ?? ''
+    maxCompletionTokens: body.max_tokens ?? 1024,
+    json: false,
+  })
+  const content = result.content ?? ''
   return Response.json({ content })
 }
 
