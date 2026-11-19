@@ -62,8 +62,16 @@ def compute_topics(
     namer,
     embedder,
     min_points: int = MIN_POINTS_FOR_TOPICS,
+    include_members: bool = False,
+    keyphrase_options: dict | None = None,
 ) -> list:
-    """Returns layers (coarse -> fine) of {label_zh, label_en, x, y, size}."""
+    """Returns layers (coarse -> fine) of {label_zh, label_en, x, y, size}.
+
+    With include_members, each entry also lists the indices of its points
+    (used by the offline label-quality eval; not sent to the frontend).
+    keyphrase_options are passed to toponymy's KeyphraseBuilder (e.g.
+    max_features, min_occurrences) — the vocabulary is embedded on every run.
+    """
     texts = list(texts)
     if len(texts) < min_points:
         return []
@@ -79,6 +87,7 @@ def compute_topics(
         ngram_range=(1, 3),
         stop_words=CHINESE_STOP_WORDS,
         verbose=False,
+        **(keyphrase_options or {}),
     )
     model = Toponymy(
         llm_wrapper=namer,
@@ -106,15 +115,16 @@ def compute_topics(
             if not mask.any() or not name:
                 continue
             centroid = coords[mask].mean(axis=0)
-            entries.append(
-                {
-                    "label_zh": str(name),
-                    "label_en": "",
-                    "x": float(centroid[0]),
-                    "y": float(centroid[1]),
-                    "size": int(mask.sum()),
-                }
-            )
+            entry = {
+                "label_zh": str(name),
+                "label_en": "",
+                "x": float(centroid[0]),
+                "y": float(centroid[1]),
+                "size": int(mask.sum()),
+            }
+            if include_members:
+                entry["members"] = np.flatnonzero(mask).tolist()
+            entries.append(entry)
         if entries:
             layers.append(entries)
     layers.reverse()

@@ -1,0 +1,241 @@
+<title>Topic Label Frontier</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&family=Fraunces:opsz,wght@9..144,600&display=swap">
+<style>
+/* Layout: a lab notebook — narrow reading column for findings, full-width chart plates, a dense results ledger. */
+:root {
+  --bg: #f7f8f6; --surface: #ffffff; --ink: #14161a; --ink-2: #4d525a; --ink-3: #80858d;
+  --rule: #e2e5e1; --grid: #eceeeb; --accent: #2a78d6;
+  --s-a: #2a78d6; --s-b: #eb6834; --s-c: #1baf7a; --s-legacy: #8b9099;
+  --good: #1f7a3d; --bad: #b3261e;
+  --display: "Fraunces", Georgia, serif; --sans: "IBM Plex Sans", system-ui, sans-serif; --mono: "IBM Plex Mono", ui-monospace, monospace;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #121417; --surface: #1a1c20; --ink: #eef0f2; --ink-2: #b9bec6; --ink-3: #868c95;
+  --rule: #2c3036; --grid: #24272c; --accent: #3987e5;
+  --s-a: #3987e5; --s-b: #d95926; --s-c: #199e70; --s-legacy: #7d838c; --good: #5cc27f; --bad: #f08a80; color-scheme: dark } }
+:root[data-theme="dark"] {
+  --bg: #121417; --surface: #1a1c20; --ink: #eef0f2; --ink-2: #b9bec6; --ink-3: #868c95;
+  --rule: #2c3036; --grid: #24272c; --accent: #3987e5;
+  --s-a: #3987e5; --s-b: #d95926; --s-c: #199e70; --s-legacy: #7d838c; --good: #5cc27f; --bad: #f08a80; color-scheme: dark }
+body { background: var(--bg); color: var(--ink); font: 15px/1.55 var(--sans); }
+.wrap { max-width: 1120px; margin: 0 auto; padding-block: 40px 64px; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); display: grid; gap: 36px; }
+h1 { font: 600 clamp(28px, 4vw, 40px)/1.1 var(--display); margin: 0; text-wrap: balance; letter-spacing: -0.01em; }
+h2 { font: 600 22px/1.2 var(--display); margin: 0; text-wrap: balance; }
+h3 { font: 600 13px/1.3 var(--sans); margin: 0; letter-spacing: .06em; text-transform: uppercase; color: var(--ink-2); }
+p { margin: 0; max-width: 68ch; }
+.lede { color: var(--ink-2); font-size: 16px; }
+.meta { font: 12px/1.5 var(--mono); color: var(--ink-3); }
+code, .mono { font-family: var(--mono); font-size: .92em; }
+.findings { display: grid; gap: 12px; max-width: 76ch; padding: 0; margin: 0; list-style: none; counter-reset: f; }
+.findings li { display: grid; grid-template-columns: 28px 1fr; gap: 8px; }
+.findings li::before { counter-increment: f; content: counter(f); font: 500 13px/1.6 var(--mono); color: var(--accent); }
+.controls { display: flex; flex-wrap: wrap; gap: 16px 24px; align-items: center; }
+.seg { display: inline-flex; border: 1px solid var(--rule); border-radius: 8px; overflow: hidden; background: var(--surface); }
+.seg button { font: 500 13px var(--sans); color: var(--ink-2); background: none; border: 0; padding: 6px 12px; cursor: pointer; }
+.seg button + button { border-left: 1px solid var(--rule); }
+.seg button[aria-pressed="true"] { background: var(--ink); color: var(--bg); }
+.seg button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.label { font: 500 12px var(--sans); color: var(--ink-3); letter-spacing: .04em; text-transform: uppercase; margin-right: 8px; }
+.plates { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 500px), 1fr)); gap: 20px; }
+.plate { background: var(--surface); border: 1px solid var(--rule); border-radius: 10px; padding: 18px 18px 10px; display: grid; gap: 10px; min-width: 0; position: relative; }
+.plate .sub { font-size: 13px; color: var(--ink-3); }
+.plate svg { width: 100%; height: auto; display: block; overflow: visible; }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 18px; font-size: 13px; color: var(--ink-2); }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.sw { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+.tip { position: absolute; pointer-events: none; background: var(--ink); color: var(--bg); font: 12px/1.45 var(--sans); padding: 8px 10px; border-radius: 6px; max-width: 280px; z-index: 5; }
+.tip b { font-weight: 600; } .tip .mono { opacity: .85; }
+.tablewrap { overflow-x: auto; border: 1px solid var(--rule); border-radius: 10px; background: var(--surface); }
+table { border-collapse: collapse; width: 100%; font-size: 13px; font-variant-numeric: tabular-nums; }
+th, td { padding: 7px 10px; text-align: right; white-space: nowrap; border-bottom: 1px solid var(--grid); }
+th:first-child, td:first-child, th:nth-child(2), td:nth-child(2) { text-align: left; }
+th { font: 600 12px var(--sans); color: var(--ink-2); position: sticky; top: 0; background: var(--surface); cursor: pointer; user-select: none; }
+th[aria-sort] { color: var(--ink); }
+tr.front td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
+.chip { display: inline-block; font: 500 11px var(--sans); padding: 1px 7px; border-radius: 99px; border: 1px solid var(--rule); color: var(--ink-2); }
+.chip.f { border-color: var(--accent); color: var(--accent); }
+.note { font-size: 13px; color: var(--ink-2); max-width: 80ch; }
+.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 240px), 1fr)); gap: 16px; }
+.card { background: var(--surface); border: 1px solid var(--rule); border-radius: 10px; padding: 16px; display: grid; gap: 4px; }
+.card .v { font: 600 26px/1.1 var(--sans); font-variant-numeric: tabular-nums; }
+.card .k { font-size: 13px; color: var(--ink-2); }
+.card .d { font-size: 13px; color: var(--good); }
+@media (prefers-reduced-motion: no-preference) { .pt { transition: r .12s; } }
+</style>
+<style>
+.labels { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 300px), 1fr)); gap: 6px 20px; padding: 0; margin: 0; list-style: none; }
+.labels li { display: grid; gap: 1px; padding: 6px 0; border-bottom: 1px solid var(--grid); }
+.labels .zh { font-size: 15px; } .labels .en { font-size: 12px; color: var(--ink-3); }
+select { font: 14px var(--sans); color: var(--ink); background: var(--surface); border: 1px solid var(--rule); border-radius: 8px; padding: 6px 10px; }
+.bars { display: grid; gap: 8px; }
+.bar { display: grid; grid-template-columns: minmax(120px, 230px) 1fr 64px; gap: 10px; align-items: center; font-size: 13px; }
+.bar .track { height: 14px; background: var(--grid); border-radius: 4px; overflow: hidden; display: flex; }
+.bar .fill { height: 100%; background: var(--s-a); border-radius: 0 4px 4px 0; }
+.bar .fill.alt { background: var(--s-b); }
+.bar .num { font: 12px var(--mono); color: var(--ink-2); text-align: right; }
+.opts { display: grid; gap: 14px; max-width: 86ch; padding: 0; margin: 0; list-style: none; }
+.opts li { background: var(--surface); border: 1px solid var(--rule); border-radius: 10px; padding: 14px 16px; display: grid; gap: 6px; }
+.opts .t { font-weight: 600; } .opts .e { font-size: 13px; color: var(--ink-2); }
+.opts .tag { font: 500 11px var(--sans); padding: 1px 7px; border-radius: 99px; border: 1px solid var(--accent); color: var(--accent); justify-self: start; }
+</style>
+
+<div class="wrap">
+  <header style="display:grid;gap:12px">
+    <div class="meta" id="stamp"></div>
+    <h1>Topic labels on the document map: which naming model?</h1>
+    <p class="lede" id="lede"></p>
+  </header>
+
+  <section style="display:grid;gap:16px">
+    <h2>Headline</h2>
+    <div class="cards" id="cards"></div>
+    <ol class="findings" id="findings"></ol>
+  </section>
+
+  <section style="display:grid;gap:16px">
+    <h2>Quality vs cost</h2>
+    <div class="controls">
+      <div><span class="label">Cost</span><span class="seg" id="c-seg"><button data-v="usd" aria-pressed="true">$ per run</button><button data-v="llmSeconds" aria-pressed="false">LLM time per run</button></span></div>
+    </div>
+    <div class="plates" id="plates"></div>
+    <p class="note" id="plate-note"></p>
+  </section>
+
+  <section style="display:grid;gap:12px">
+    <h2>All runs</h2>
+    <p class="note" id="table-note"></p>
+    <div class="tablewrap"><table id="tbl"></table></div>
+  </section>
+
+  <section style="display:grid;gap:12px">
+    <h2>What the labels look like</h2>
+    <p class="note">The two coarsest layers, which are what the map shows when zoomed out, followed by claims the judges found unsupported by the cluster's passages.</p>
+    <div class="controls"><label><span class="label">Model</span><select id="ex-model"></select></label></div>
+    <div id="ex"></div>
+  </section>
+
+  <section style="display:grid;gap:16px">
+    <h2>Where the time goes</h2>
+    <p class="note" id="perf-note"></p>
+    <div class="plate"><h3>One document-map load today, by stage</h3><div class="sub" id="perf-sub"></div><div class="bars" id="perf-bars"></div></div>
+    <h2 style="margin-top:8px">Caching and performance options</h2>
+    <ol class="opts" id="opts"></ol>
+  </section>
+
+  <section style="display:grid;gap:10px">
+    <h2>Method</h2>
+    <div class="note" id="method"></div>
+  </section>
+</div>
+
+<script>
+const DATA = /*DATA*/null;
+const N = DATA.notes;
+const css = v => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+const short = m => m.replace(/^@cf\/[^/]+\//, '').replace(/-instruct.*|-it$|-fp8.*|-0813|-1017/g, '').replace('#kp', ' · vocab ');
+const isProd = r => r.model === DATA.production;
+const isVariant = r => r.model.includes('#');
+const METRICS = [
+  ['descriptive', 'Descriptive', 'Judge score 1–5: does the label tell a reader what the cluster is about?', 1, 5],
+  ['faithful', 'Faithful', 'Share of the label’s claims supported by the cluster’s passages', 0, 1],
+  ['match', 'Discriminative', 'Judge picks the right label for a cluster from every label in its layer', 0, 1],
+];
+let C = 'usd';
+const rows = DATA.rows.filter(r => r.labels > 0);
+function frontier(ps) { const s = [...ps].sort((a, b) => a.cost - b.cost || b.q - a.q); const out = []; let best = -Infinity; for (const p of s) if (p.q > best) { out.push(p); best = p.q; } return out; }
+const tip = document.createElement('div'); tip.className = 'tip'; tip.hidden = true;
+function plate([key, title, sub]) {
+  const ps = rows.filter(r => !isVariant(r)).map(r => ({ r, q: r[key], cost: r[C] })).filter(p => p.cost > 0 && !isNaN(p.q));
+  const el = document.createElement('div'); el.className = 'plate';
+  el.innerHTML = `<h3>${title}</h3><div class="sub">${sub} · vs ${C === 'usd' ? 'cost' : 'summed LLM latency'} (log scale)</div>`;
+  const W = 520, H = 300, L = 44, R = 16, T = 12, B = 40;
+  const xs = ps.map(p => p.cost); const x0 = Math.log10(Math.min(...xs)) - 0.12, x1 = Math.log10(Math.max(...xs)) + 0.12;
+  const qs = ps.map(p => p.q); const span = Math.max(...qs) - Math.min(...qs) || 0.1;
+  const qmin = Math.min(...qs) - span * 0.12, qmax = Math.max(...qs) + span * 0.12;
+  const X = v => L + (Math.log10(v) - x0) / (x1 - x0) * (W - L - R);
+  const Y = v => T + (1 - (v - qmin) / (qmax - qmin)) * (H - T - B);
+  const ns = 'http://www.w3.org/2000/svg'; const svg = document.createElementNS(ns, 'svg');
+  svg.setAttribute('viewBox', `0 0 ${W} ${H}`); svg.setAttribute('role', 'img'); svg.setAttribute('aria-label', `${title} vs cost per model`);
+  const add = (tag, attrs, parent = svg) => { const e = document.createElementNS(ns, tag); for (const k in attrs) e.setAttribute(k, attrs[k]); parent.appendChild(e); return e; };
+  const mono = 'IBM Plex Mono, monospace';
+  for (let i = 0; i <= 4; i++) { const v = qmin + (qmax - qmin) * i / 4, y = Y(v);
+    add('line', { x1: L, x2: W - R, y1: y, y2: y, stroke: css('--grid'), 'stroke-width': 1 });
+    add('text', { x: L - 8, y: y + 4, 'text-anchor': 'end', 'font-size': 11, fill: css('--ink-3'), 'font-family': mono }).textContent = key === 'descriptive' ? v.toFixed(2) : v.toFixed(2); }
+  const ticks = []; for (let e = Math.floor(x0); e <= Math.ceil(x1); e++) for (const m of [1, 2, 5]) { const v = m * 10 ** e; if (Math.log10(v) >= x0 && Math.log10(v) <= x1) ticks.push(v); }
+  for (const v of ticks) { const x = X(v);
+    add('line', { x1: x, x2: x, y1: T, y2: H - B, stroke: css('--grid'), 'stroke-width': 1 });
+    add('text', { x, y: H - B + 16, 'text-anchor': 'middle', 'font-size': 11, fill: css('--ink-3'), 'font-family': mono }).textContent = C === 'usd' ? '$' + +v.toPrecision(1) : +v.toPrecision(1) + 's'; }
+  add('text', { x: (L + W - R) / 2, y: H - 6, 'text-anchor': 'middle', 'font-size': 12, fill: css('--ink-2') }).textContent = C === 'usd' ? `USD per full labelling run (${DATA.corpus.chunks.toLocaleString()} chunks)` : 'seconds of LLM time per run (calls are sequential today)';
+  const fr = frontier(ps); let d = '';
+  fr.forEach((p, i) => { const x = X(p.cost), y = Y(p.q); d += i === 0 ? `M${x},${y}` : `H${x}V${y}`; }); if (fr.length) d += `H${W - R}`;
+  add('path', { d, fill: 'none', stroke: css('--ink-2'), 'stroke-width': 2, 'stroke-linejoin': 'round', opacity: .5 });
+  const frSet = new Set(fr); const boxes = ps.map(p => ({ x0: X(p.cost) - 6, x1: X(p.cost) + 6, y0: Y(p.q) - 6, y1: Y(p.q) + 6 }));
+  for (const p of ps) { const x = X(p.cost), y = Y(p.q);
+    add('circle', { cx: x, cy: y, r: isProd(p.r) || frSet.has(p) ? 6 : 5, fill: css(isProd(p.r) ? '--s-b' : frSet.has(p) ? '--s-a' : '--s-legacy'), stroke: css('--surface'), 'stroke-width': 2 });
+    const hit = add('circle', { cx: x, cy: y, r: 12, fill: 'transparent', tabindex: 0 });
+    const show = () => { const r = p.r;
+      tip.innerHTML = `<b>${short(r.model)}</b>${isProd(r) ? ' · production' : ''}<br><span class="mono">desc ${r.descriptive.toFixed(2)} · faithful ${r.faithful.toFixed(3)} · match ${r.match.toFixed(3)}<br>$${r.usd.toFixed(3)}/run · ${r.llmSeconds.toFixed(0)}s LLM · ${r.labels} labels</span>`;
+      tip.hidden = false; el.appendChild(tip);
+      const bx = svg.getBoundingClientRect(), pb = el.getBoundingClientRect(), sc = bx.width / W;
+      let left = bx.left - pb.left + x * sc + 12; if (left + 280 > pb.width) left = bx.left - pb.left + x * sc - 292;
+      tip.style.left = Math.max(4, left) + 'px'; tip.style.top = (bx.top - pb.top + y * sc - 10) + 'px'; };
+    hit.addEventListener('mouseenter', show); hit.addEventListener('focus', show);
+    hit.addEventListener('mouseleave', () => tip.hidden = true); hit.addEventListener('blur', () => tip.hidden = true); }
+  const hits = b => boxes.some(o => b.x0 < o.x1 && b.x1 > o.x0 && b.y0 < o.y1 && b.y1 > o.y0);
+  const toLabel = [...ps.filter(p => isProd(p.r)), ...fr.filter(p => !isProd(p.r))];
+  for (const p of toLabel) { const x = X(p.cost), y = Y(p.q); const text = short(p.r.model) + (isProd(p.r) ? ' · production' : '');
+    const w = text.length * 6.1 + 4, h = 13; const cands = [[x + 9, y - 16], [x + 9, y + 4], [x - 9 - w, y - 16], [x - 9 - w, y + 4]];
+    for (const dy of [28, 44, 60, 76, 92]) cands.push([x + 14, y + dy], [x + 14, y - dy - h], [x - 14 - w, y + dy], [x - 14 - w, y - dy - h]);
+    const inB = ([lx, ly]) => lx >= L && lx + w <= W - 2 && ly >= 0 && ly + h <= H - B;
+    const order = isProd(p.r) ? [...cands.filter(c => inB(c) && !hits({ x0: c[0], x1: c[0] + w, y0: c[1], y1: c[1] + h })), cands.find(inB)].filter(Boolean) : cands;
+    for (const [lx, ly] of order) { const box = { x0: lx, x1: lx + w, y0: ly, y1: ly + h };
+      if (!isProd(p.r) && (!inB([lx, ly]) || hits(box))) continue; boxes.push(box);
+      if (Math.abs(ly + h / 2 - y) > 20) add('line', { x1: x, y1: y, x2: lx < x ? lx + w : lx, y2: ly + h / 2, stroke: css('--ink-3'), 'stroke-width': 1 });
+      add('text', { x: lx, y: ly + 10, 'font-size': 11, fill: css('--ink'), 'font-family': 'IBM Plex Sans, sans-serif' }).textContent = text; break; } }
+  el.appendChild(svg);
+  const leg = document.createElement('div'); leg.className = 'legend';
+  leg.innerHTML = `<span><i class="sw" style="background:var(--s-a)"></i>on the frontier</span><span><i class="sw" style="background:var(--s-b)"></i>production (kimi-k2.6)</span><span><i class="sw" style="background:var(--s-legacy)"></i>dominated</span>`;
+  el.insertBefore(leg, svg); return el;
+}
+function renderPlates() { const host = document.getElementById('plates'); host.innerHTML = ''; for (const m of METRICS) host.appendChild(plate(m)); }
+
+let sortKey = 'descriptive', sortDir = -1;
+function renderTable() {
+  const cols = [['model', 'Model'], ['descriptive', 'Descriptive'], ['faithful', 'Faithful'], ['fullyFaithful', 'Fully faithful'], ['match', 'Match'], ['embed', 'Embed match'], ['generic', 'Generic'], ['coarseDesc', 'Desc. coarse'], ['medianLen', 'Median chars'], ['dupRate', 'Duplicates'], ['labels', 'Labels'], ['usd', '$ / run'], ['llmSeconds', 'LLM s'], ['calls', 'Calls']];
+  const rs = rows.map(r => ({ ...r, coarseDesc: r.coarse.descriptive }));
+  rs.sort((a, b) => (a[sortKey] > b[sortKey] ? 1 : a[sortKey] < b[sortKey] ? -1 : 0) * sortDir);
+  const f = (k, v) => k === 'model' ? short(v) + (v === DATA.production ? ' <span class="chip f">production</span>' : '') : typeof v !== 'number' || isNaN(v) ? '–' : ['labels', 'calls', 'medianLen'].includes(k) ? v : k === 'usd' ? v.toFixed(3) : k === 'llmSeconds' ? v.toFixed(0) : ['descriptive', 'coarseDesc'].includes(k) ? v.toFixed(2) : k === 'dupRate' || k === 'generic' ? (v * 100).toFixed(0) + '%' : v.toFixed(3);
+  const tbl = document.getElementById('tbl');
+  tbl.innerHTML = `<thead><tr>${cols.map(([k, l]) => `<th data-k="${k}" ${k === sortKey ? `aria-sort="${sortDir > 0 ? 'ascending' : 'descending'}"` : ''}>${l}${k === sortKey ? (sortDir > 0 ? ' ↑' : ' ↓') : ''}</th>`).join('')}</tr></thead><tbody>${rs.map(r => `<tr class="${isProd(r) ? 'front' : ''}">${cols.map(([k]) => `<td>${f(k, r[k])}</td>`).join('')}</tr>`).join('')}</tbody>`;
+  tbl.querySelectorAll('th').forEach(th => th.addEventListener('click', () => { const k = th.dataset.k; sortDir = k === sortKey ? -sortDir : (['model', 'usd', 'llmSeconds', 'calls', 'generic', 'dupRate', 'medianLen'].includes(k) ? 1 : -1); sortKey = k; renderTable(); }));
+}
+function renderExamples() {
+  const sel = document.getElementById('ex-model'); const m = sel.value; const ex = DATA.examples[m]; if (!ex) return;
+  const esc = s => s.replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+  document.getElementById('ex').innerHTML = ex.layers.map((l, i) => `<h3 style="margin:14px 0 6px">Layer ${i + 1} · ${l.length} labels</h3><ul class="labels">${l.map(s => { const [zh, en] = s.split('\u0001'); return `<li><span class="zh">${esc(zh)}</span><span class="en">${esc(en || '—')}</span></li>`; }).join('')}</ul>`).join('')
+    + (ex.unsupported.length ? `<h3 style="margin:18px 0 6px">Unsupported claims (first ${ex.unsupported.length})</h3><ul class="labels">${ex.unsupported.map(u => `<li><span class="zh">${esc(u.label)}</span><span class="en">unsupported: ${esc(u.claims.join('；'))}</span></li>`).join('')}</ul>` : '<p class="note" style="margin-top:12px">No unsupported claims found.</p>');
+}
+function renderPerf() {
+  const st = N.perf.stages; const max = Math.max(...st.map(s => s.now));
+  document.getElementById('perf-bars').innerHTML = st.map(s => `<div class="bar"><span>${s.name}</span><span class="track"><span class="fill ${s.alt ? 'alt' : ''}" style="width:${Math.max(0.6, s.now / max * 100)}%"></span></span><span class="num">${s.label ?? s.now + 's'}</span></div>`).join('');
+  document.getElementById('perf-sub').textContent = N.perf.sub;
+  document.getElementById('perf-note').innerHTML = N.perf.note;
+  document.getElementById('opts').innerHTML = N.perf.options.map(o => `<li>${o.tag ? `<span class="tag">${o.tag}</span>` : ''}<span class="t">${o.title}</span><span>${o.body}</span>${o.evidence ? `<span class="e">${o.evidence}</span>` : ''}</li>`).join('');
+}
+document.querySelector('#c-seg').addEventListener('click', e => { const b = e.target.closest('button'); if (!b) return; document.querySelectorAll('#c-seg button').forEach(x => x.setAttribute('aria-pressed', x === b)); C = b.dataset.v; renderPlates(); });
+document.getElementById('stamp').textContent = `Generated ${DATA.generated} · ${rows.length} runs · ${DATA.corpus.chunks.toLocaleString()} chunks from ${DATA.corpus.docs} documents · judges: ${DATA.judges.map(short).join(', ')}`;
+document.getElementById('lede').innerHTML = N.lede;
+document.getElementById('cards').innerHTML = N.cards.map(c => `<div class="card"><div class="k">${c.k}</div><div class="v">${c.v}</div><div class="d">${c.d ?? ''}</div></div>`).join('');
+document.getElementById('findings').innerHTML = N.findings.map(f => `<li><span>${f}</span></li>`).join('');
+document.getElementById('method').innerHTML = N.method;
+document.getElementById('plate-note').textContent = N.plateNote;
+document.getElementById('table-note').textContent = N.tableNote;
+const sel = document.getElementById('ex-model');
+sel.innerHTML = rows.map(r => `<option value="${r.model}" ${isProd(r) ? 'selected' : ''}>${short(r.model)}${isProd(r) ? ' (production)' : ''}</option>`).join('');
+sel.addEventListener('change', renderExamples);
+renderPlates(); renderTable(); renderExamples(); renderPerf();
+window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', renderPlates);
+new MutationObserver(renderPlates).observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
+</script>
