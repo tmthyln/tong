@@ -12,7 +12,7 @@
 import { readFileSync, writeFileSync, mkdirSync, existsSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { neuronsToUsd } from '../../server/lib/extraction/llm'
-import { clients, slug } from '../common/workers-ai'
+import { cachedClients, slug } from '../common/workers-ai'
 import { mapLimit } from '../../server/lib/map-limit'
 import { extract, type Mention, type Relation } from '../../server/lib/extraction/extract'
 import { DATA_DIR, loadAppSchema, loadDouluo, loadDouluoWindows, loadLit, type Dataset, type Example } from './datasets'
@@ -20,6 +20,7 @@ import { getStrategy, STRATEGIES, type Prediction } from './strategies'
 import { addPrf, scoreMentions, scoreRelations, ZERO, type PRF } from './metrics'
 
 const RESULTS_DIR = join(process.cwd(), 'eval/extraction/results')
+const CACHE_DIR = join(DATA_DIR, 'cache')
 
 
 function loadDataset(name: string): Dataset {
@@ -34,16 +35,25 @@ export interface RunFile {
   model: string
   thinking: boolean
   examples: Array<{ id: string; chars: number; pred: Prediction; error?: string }>
+  /** Calls replayed from the response cache; wall-clock latency is only meaningful when 0. */
+  cacheHits?: number
+}
+
+interface RunOpts {
+  /** Recompute even if the run file exists (calls replay from the cache). */
+  force?: boolean
+  /** Bypass cache reads: real calls, for timing. */
+  fresh?: boolean
 }
 
 // ------------------------------------------------------------------ run
 
-async function runOne(dataset: string, strategyName: string, model: string, thinking: boolean, force = false): Promise<RunFile> {
+async function runOne(dataset: string, strategyName: string, model: string, thinking: boolean, opts: RunOpts = {}): Promise<RunFile> {
   const strategy = getStrategy(strategyName)
   const out = join(RESULTS_DIR, dataset, `${strategy.name}__${slug(model)}${thinking ? '__thinking' : ''}.json`)
-  if (!force && existsSync(out)) return JSON.parse(readFileSync(out, 'utf8')) as RunFile
+  if (!opts.force && !opts.fresh && existsSync(out)) return JSON.parse(readFileSync(out, 'utf8')) as RunFile
   const ds = loadDataset(dataset)
-  const { client, rawRun } = clients()
+  const { client, rawRun, stats } = cachedClients({ dir: CACHE_DIR, fresh: opts.fresh })
   const t0 = Date.now()
   const examples = await mapLimit(ds.examples, Number(process.env.EVAL_EXAMPLE_CONCURRENCY ?? 6), async (ex) => {
     try {
@@ -54,13 +64,13 @@ async function runOne(dataset: string, strategyName: string, model: string, thin
       return { id: ex.id, chars: ex.text.length, pred: empty, error: String(err) }
     }
   })
-  const file: RunFile = { dataset, strategy: strategy.name, model, thinking, examples }
+  const file: RunFile = { dataset, strategy: strategy.name, model, thinking, examples, cacheHits: stats.hits }
   mkdirSync(join(RESULTS_DIR, dataset), { recursive: true })
   writeFileSync(out, JSON.stringify(file, null, 1))
   const s = summarize(file, ds)
   console.log(
     `${dataset.padEnd(7)} ${strategy.name.padEnd(24)} ${model.padEnd(42)} ${thinking ? 'T' : ' '}  ` +
-      `NER F1 ${fmt(s.ner?.typed.f1)}  RE F1 ${fmt(s.re?.strict.f1)}  $/1Mchar ${s.usdPerMChar.toFixed(2).padStart(7)}  calls ${s.calls}  err ${s.errors}  trunc ${s.truncated}${s.anchorDropped ? `  unanchored ${s.anchorDropped}` : ''}  ${((Date.now() - t0) / 1000).toFixed(0)}s`,
+      `NER F1 ${fmt(s.ner?.typed.f1)}  RE F1 ${fmt(s.re?.strict.f1)}  $/1Mchar ${s.usdPerMChar.toFixed(2).padStart(7)}  calls ${s.calls}  err ${s.errors}  trunc ${s.truncated}${s.anchorDropped ? `  unanchored ${s.anchorDropped}` : ''}  ${((Date.now() - t0) / 1000).toFixed(0)}s${stats.hits ? `  (cached ${stats.hits}/${stats.hits + stats.misses})` : ''}`,
   )
   return file
 }
@@ -185,7 +195,7 @@ function vote<T>(lists: T[][], key: (t: T) => string, min: number): T[] {
 async function buildSilver() {
   const schema = loadAppSchema()
   const windows = loadDouluoWindows({ windows: 12, windowChunks: 4 })
-  const { client } = clients()
+  const { client } = cachedClients({ dir: CACHE_DIR })
   const opts = { thinking: true, maxCompletionTokens: 12000 }
   // Thinking occasionally runs away to the token cap without answering; retry those calls without thinking.
   const robust: typeof extract = async (c, t, sc, o) => {
@@ -270,7 +280,7 @@ async function main() {
   const pos = args.filter((a) => !a.startsWith('--'))
   if (cmd === 'silver') return buildSilver()
   if (cmd === 'run') {
-    await runOne(pos[0], pos[1], pos[2], flags.has('--thinking'), flags.has('--force'))
+    await runOne(pos[0], pos[1], pos[2], flags.has('--thinking'), { force: flags.has('--force'), fresh: flags.has('--fresh') })
     return
   }
   if (cmd === 'sweep') {
@@ -281,7 +291,7 @@ async function main() {
       if (flags.has('--reverse')) cells = cells.reverse()
       await mapLimit(cells, flags.has('--slow') ? 1 : 4, async ([s, m, t]) => {
         try {
-          await runOne(d, s, m, t)
+          await runOne(d, s, m, t, { force: flags.has('--force'), fresh: flags.has('--fresh') })
         } catch (err) {
           console.error(`FAILED ${d} ${s} ${m}: ${err}`)
         }
@@ -308,7 +318,7 @@ async function main() {
     console.log(`${all.length} runs summarized → ${join(RESULTS_DIR, 'summary.json')}`)
     return
   }
-  console.log(`usage: cli.ts silver | run <dataset> <strategy> <model> [--thinking] [--force] | sweep [datasets] | summary\nstrategies: ${STRATEGIES.map((s) => s.name).join(', ')}`)
+  console.log(`usage: cli.ts silver | run <dataset> <strategy> <model> [--thinking] [--force] [--fresh] | sweep [datasets] | summary\nstrategies: ${STRATEGIES.map((s) => s.name).join(', ')}`)
 }
 
 main().catch((err) => {

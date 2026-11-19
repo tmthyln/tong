@@ -48,3 +48,13 @@ document are not modelled.
 - e2e: pairwise P/R/F1 over cross-document pairs of named-entity surface forms
   (PERSON, LOCATION, GPE, ORGANIZATION) — same final graph entity iff same gold key.
 - cost: billed neurons at $0.011 / 1,000, per 1M characters of source text.
+
+## Response cache
+
+Every model call goes through `eval/common/cache.ts`, keyed by model, the exact
+Workers AI arguments production sends, and a replicate index, and stored under
+`data/cache/`. A stored call keeps its usage and latency, so a replayed run
+reports the same cost. `--force` recomputes a run (re-parsing, re-scoring) from
+the cache for free; `--fresh` bypasses cache reads for real calls (timing runs).
+A run file's `cacheHits` says how many calls were replayed: its wall-clock times
+mean nothing unless that is 0.

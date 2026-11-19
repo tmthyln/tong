@@ -4,7 +4,7 @@
  *
  *   npm run eval:resolution -- build <douluo|sanguo>          # chunk + production NER (once)
  *   npm run eval:resolution -- forms <corpus>                 # dump surface forms for annotation
- *   npm run eval:resolution -- run <corpus> <task> <strategy> <model> [--force]
+ *   npm run eval:resolution -- run <corpus> <task> <strategy> <model> [--force] [--fresh]
  *   npm run eval:resolution -- sweep [corpus...] [--model=substr]
  *   npm run eval:resolution -- report [out]
  *
@@ -15,13 +15,14 @@ import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { neuronsToUsd } from '../../server/lib/extraction/llm'
 import { extractEntitiesBatch, removeOverlaps, ENTITY_BATCH_CHUNKS, type NodeTypeInput } from '../../server/lib/entity-extraction'
-import { clients, slug } from '../common/workers-ai'
+import { cachedClients, slug } from '../common/workers-ai'
 import { mapLimit } from '../../server/lib/map-limit'
 import { DATA_DIR, douluoRawDocs, loadCorpus, loadGold, sanguoRawDocs, surfaceForms, mentionContext, type Corpus, type Doc } from './datasets'
 import { COREF_STRATEGIES, LINK_STRATEGIES, E2E_STRATEGIES, type CorefOutput, type LinkOutput, type E2EOutput, type Cost } from './strategies'
 import { scoreCoref, scoreLinking, scoreE2E, type CorefScore, type LinkScore, type E2EScore } from './metrics'
 
 const RESULTS_DIR = join(process.cwd(), 'eval/resolution/results')
+const CACHE_DIR = join(DATA_DIR, 'cache')
 
 function appNodeTypes(): NodeTypeInput[] {
   const f = readdirSync('.wrangler/state/v3/d1/miniflare-D1DatabaseObject').find((f) => f.endsWith('.sqlite') && f !== 'metadata.sqlite')!
@@ -36,7 +37,7 @@ function appNodeTypes(): NodeTypeInput[] {
 async function build(name: string) {
   const raw = name === 'douluo' ? douluoRawDocs() : name === 'sanguo' ? sanguoRawDocs() : null
   if (!raw) throw new Error(`unknown corpus ${name}`)
-  const { client } = clients()
+  const { client } = cachedClients({ dir: CACHE_DIR })
   const nodeTypes = appNodeTypes()
   const env = {} as Env
   const docs: Doc[] = []
@@ -84,18 +85,27 @@ export interface RunFile {
   cost: Cost
   score: CorefScore | LinkScore | E2EScore
   output: CorefOutput | LinkOutput | E2EOutput
+  /** Calls replayed from the response cache; latency is only meaningful when 0. */
+  cacheHits?: number
+}
+
+interface RunOpts {
+  /** Recompute even if the run file exists (calls replay from the cache). */
+  force?: boolean
+  /** Bypass cache reads: real calls, for timing. */
+  fresh?: boolean
 }
 
 type Task = 'coref' | 'link' | 'e2e'
 
 const corpusChars = (c: Corpus) => c.docs.reduce((n, d) => n + d.chunks.reduce((k, ch) => k + ch.content.length, 0), 0)
 
-async function runOne(corpusName: string, task: Task, strategyName: string, model: string, force = false): Promise<RunFile> {
+async function runOne(corpusName: string, task: Task, strategyName: string, model: string, opts: RunOpts = {}): Promise<RunFile> {
   const out = join(RESULTS_DIR, corpusName, `${task}__${strategyName}__${slug(model)}.json`)
-  if (!force && existsSync(out)) return JSON.parse(readFileSync(out, 'utf8')) as RunFile
+  if (!opts.force && !opts.fresh && existsSync(out)) return JSON.parse(readFileSync(out, 'utf8')) as RunFile
   const corpus = loadCorpus(corpusName)
   const gold = loadGold(corpusName)
-  const { client, rawRun } = clients()
+  const { client, rawRun, stats } = cachedClients({ dir: CACHE_DIR, fresh: opts.fresh })
   const t0 = Date.now()
   let file: RunFile
   if (task === 'coref') {
@@ -114,12 +124,13 @@ async function runOne(corpusName: string, task: Task, strategyName: string, mode
     const output = await s.run(corpus, gold, { client, rawRun, model })
     file = { corpus: corpusName, task, strategy: s.name, model, chars: corpusChars(corpus), cost: output.cost, score: scoreLinking(corpus, gold, output), output }
   }
+  file.cacheHits = stats.hits
   mkdirSync(join(RESULTS_DIR, corpusName), { recursive: true })
   writeFileSync(out, JSON.stringify(file, null, 1))
   const sc = file.score as { f1: number; p: number; r: number }
   console.log(
     `${corpusName.padEnd(7)} ${task.padEnd(5)} ${strategyName.padEnd(22)} ${model.padEnd(42)} F1 ${sc.f1.toFixed(3)} P ${sc.p.toFixed(3)} R ${sc.r.toFixed(3)}  ` +
-      `$/1Mchar ${((neuronsToUsd(file.cost.neurons) / file.chars) * 1e6).toFixed(3).padStart(7)}  calls ${file.cost.calls} err ${file.cost.errors}  ${((Date.now() - t0) / 1000).toFixed(0)}s`,
+      `$/1Mchar ${((neuronsToUsd(file.cost.neurons) / file.chars) * 1e6).toFixed(3).padStart(7)}  calls ${file.cost.calls} err ${file.cost.errors}  ${((Date.now() - t0) / 1000).toFixed(0)}s${stats.hits ? `  (cached ${stats.hits}/${stats.hits + stats.misses})` : ''}`,
   )
   return file
 }
@@ -168,7 +179,7 @@ async function main() {
   if (cmd === 'build') return build(pos[0])
   if (cmd === 'forms') return dumpForms(pos[0])
   if (cmd === 'run') {
-    await runOne(pos[0], pos[1] as Task, pos[2], pos[3] ?? 'none', flags.has('--force'))
+    await runOne(pos[0], pos[1] as Task, pos[2], pos[3] ?? 'none', { force: flags.has('--force'), fresh: flags.has('--fresh') })
     return
   }
   if (cmd === 'sweep') {
@@ -180,7 +191,7 @@ async function main() {
       // Spread models across workers so one model's rate limit doesn't stall the rest.
       await mapLimit(cells, Number(process.env.EVAL_CELL_CONCURRENCY ?? 4), async ([t, s, m]) => {
         try {
-          await runOne(c, t, s, m, flags.has('--force'))
+          await runOne(c, t, s, m, { force: flags.has('--force'), fresh: flags.has('--fresh') })
         } catch (err) {
           console.error(`FAILED ${c} ${t} ${s} ${m}: ${err}`)
         }

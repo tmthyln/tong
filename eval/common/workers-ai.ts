@@ -8,6 +8,7 @@ import { join } from 'node:path'
 import { homedir } from 'node:os'
 import { execSync } from 'node:child_process'
 import { workersAiRestClient, type LlmClient } from '../../server/lib/extraction/llm'
+import { cachedClient, cachedRawRun, type CacheOpts, type CacheStats } from './cache'
 
 // ------------------------------------------------------------------ auth
 
@@ -66,3 +67,13 @@ export function clients() {
 // ------------------------------------------------------------------ helpers
 
 export const slug = (s: string) => s.replace(/^@cf\//, '').replace(/[^a-z0-9.-]+/gi, '_')
+
+/**
+ * `clients()` behind the per-call response cache (./cache): reruns, rescoring
+ * runs and `--force` replays cost nothing; `fresh` makes real calls (timing).
+ */
+export function cachedClients(opts: CacheOpts) {
+  const { client, rawRun } = clients()
+  const stats: CacheStats = { hits: 0, misses: 0 }
+  return { client: cachedClient(client, opts, stats), rawRun: cachedRawRun(rawRun, opts, stats), stats }
+}

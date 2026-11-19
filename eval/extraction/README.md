@@ -63,3 +63,13 @@ the rest. Production's schema wording replaces the dataset's instructions, so it
 runs on `douluo` only in the sweep. Gold covers 4-chunk windows, so with
 production's 6-chunk relation windows each example is a single window: the
 cross-window overlap (chunks up to 2 apart sharing a window) is not exercised.
+
+## Response cache
+
+Every model call goes through `eval/common/cache.ts`, keyed by model, the exact
+Workers AI arguments production sends, and a replicate index, and stored under
+`data/cache/`. A stored call keeps its usage and latency, so a replayed run
+reports the same cost. `--force` recomputes a run (re-parsing, re-scoring) from
+the cache for free; `--fresh` bypasses cache reads for real calls (timing runs).
+A run file's `cacheHits` says how many calls were replayed: its wall-clock times
+mean nothing unless that is 0.
