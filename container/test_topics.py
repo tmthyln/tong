@@ -4,7 +4,8 @@ import re
 import httpx
 import numpy as np
 
-from topics import CHINESE_STOP_WORDS, JiebaTokenizer, compute_topics, translate_labels
+import topics
+from topics import CHINESE_STOP_WORDS, KEYPHRASE_MAX_FEATURES, JiebaTokenizer, compute_topics, translate_labels
 from workers_ai import WorkersAIClient, WorkersAINamer, WorkersAIEmbedder
 
 
@@ -76,8 +77,8 @@ def test_translate_labels_failure_returns_blanks():
     assert translate_labels(["唐诗", "宋词"], client) == ["", ""]
 
 
-def test_compute_topics_end_to_end_with_blobs():
-    # Three well-separated blobs of 30 points each, texts drawn from three themes.
+def blob_corpus():
+    """Three well-separated blobs of 30 points each, texts drawn from three themes."""
     rng = np.random.default_rng(42)
     themes = [
         "唐代诗人李白写了很多关于月亮和酒的诗歌作品",
@@ -93,9 +94,14 @@ def test_compute_topics_end_to_end_with_blobs():
             center = np.zeros(16)
             center[b * 5 : b * 5 + 5] = 3.0
             vecs.append(center + rng.normal(scale=0.1, size=16))
+    return texts, np.asarray(vecs, np.float32), np.asarray(coords, np.float32)
+
+
+def test_compute_topics_end_to_end_with_blobs():
+    texts, vecs, coords = blob_corpus()
     namer, _ = make_fake_namer()
 
-    layers = compute_topics(texts, np.asarray(vecs, np.float32), np.asarray(coords, np.float32), namer, FakeEmbedder())
+    layers = compute_topics(texts, vecs, coords, namer, FakeEmbedder())
 
     assert isinstance(layers, list) and len(layers) >= 1
     for layer in layers:
@@ -111,3 +117,35 @@ def test_compute_topics_end_to_end_with_blobs():
 
 def test_stop_words_present():
     assert "的" in CHINESE_STOP_WORDS
+
+
+class RecordingEmbedder(FakeEmbedder):
+    def __init__(self):
+        self.batches = []
+
+    def encode(self, texts, show_progress_bar=None, **kwargs):
+        texts = list(texts)
+        self.batches.append(texts)
+        return super().encode(texts)
+
+
+def test_keyphrase_vocabulary_is_capped(monkeypatch):
+    seen = {}
+    real = topics.KeyphraseBuilder
+
+    def spy(**kwargs):
+        seen.update(kwargs)
+        return real(**kwargs)
+
+    monkeypatch.setattr(topics, "KeyphraseBuilder", spy)
+    texts, vecs, coords = blob_corpus()
+    namer, _ = make_fake_namer()
+    compute_topics(texts, vecs, coords, namer, FakeEmbedder())
+    assert seen["max_features"] == KEYPHRASE_MAX_FEATURES == 5_000
+
+    # An explicit option overrides the default, and the vocabulary toponymy
+    # embeds (its largest encode batch) respects it.
+    embedder = RecordingEmbedder()
+    compute_topics(texts, vecs, coords, namer, embedder, keyphrase_options={"max_features": 12})
+    assert seen["max_features"] == 12
+    assert max(len(b) for b in embedder.batches) <= 12

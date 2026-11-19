@@ -24,6 +24,13 @@ CHINESE_STOP_WORDS = frozenset(
 
 MIN_POINTS_FOR_TOPICS = 15
 
+# Keyphrase vocabulary: the most frequent n-grams in the library (toponymy's
+# default is 50,000). The whole vocabulary is embedded on every run, which
+# dominated the bridge's embedding traffic (41k phrases for 1k chunks) and hit
+# the client's 120s timeout. In the label-quality eval (eval/topics) caps of
+# 3,000 and 10,000 named clusters as well as the full vocabulary.
+KEYPHRASE_MAX_FEATURES = 5_000
+
 
 class JiebaTokenizer:
     """Adapter matching toponymy's TokenizerLike protocol for Chinese text."""
@@ -70,7 +77,7 @@ def compute_topics(
     With include_members, each entry also lists the indices of its points
     (used by the offline label-quality eval; not sent to the frontend).
     keyphrase_options are passed to toponymy's KeyphraseBuilder (e.g.
-    max_features, min_occurrences) — the vocabulary is embedded on every run.
+    max_features, min_occurrences) and override the defaults here.
     """
     texts = list(texts)
     if len(texts) < min_points:
@@ -87,7 +94,7 @@ def compute_topics(
         ngram_range=(1, 3),
         stop_words=CHINESE_STOP_WORDS,
         verbose=False,
-        **(keyphrase_options or {}),
+        **{"max_features": KEYPHRASE_MAX_FEATURES, **(keyphrase_options or {})},
     )
     model = Toponymy(
         llm_wrapper=namer,
