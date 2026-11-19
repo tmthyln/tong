@@ -1,0 +1,9 @@
+{
+  "extends": "./tsconfig.worker.json",
+  "compilerOptions": {
+    "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.eval.tsbuildinfo",
+    "noEmit": true
+  },
+  "include": ["eval/**/*.ts"],
+  "exclude": ["eval/**/data/**", "eval/**/results/**"]
+}

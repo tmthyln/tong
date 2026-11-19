@@ -12,7 +12,8 @@
 import { readFileSync, writeFileSync, mkdirSync, existsSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { neuronsToUsd } from '../../server/lib/extraction/llm'
-import { clients, pool, slug } from '../common/workers-ai'
+import { clients, slug } from '../common/workers-ai'
+import { mapLimit } from '../../server/lib/map-limit'
 import { extract, type Mention, type Relation } from '../../server/lib/extraction/extract'
 import { DATA_DIR, loadAppSchema, loadDouluo, loadDouluoWindows, loadLit, type Dataset, type Example } from './datasets'
 import { getStrategy, STRATEGIES, type Prediction } from './strategies'
@@ -44,7 +45,7 @@ async function runOne(dataset: string, strategyName: string, model: string, thin
   const ds = loadDataset(dataset)
   const { client, rawRun } = clients()
   const t0 = Date.now()
-  const examples = await pool(ds.examples, Number(process.env.EVAL_EXAMPLE_CONCURRENCY ?? 6), async (ex) => {
+  const examples = await mapLimit(ds.examples, Number(process.env.EVAL_EXAMPLE_CONCURRENCY ?? 6), async (ex) => {
     try {
       const pred = await strategy.run(ex, { client, rawRun, model, thinking, schema: ds.schema })
       return { id: ex.id, chars: ex.text.length, pred }
@@ -192,7 +193,7 @@ async function buildSilver() {
     if (r.finishReason !== 'length' && !r.error) return r
     return extract(c, t, sc, { ...o, thinking: false, maxCompletionTokens: 4096 })
   }
-  const examples: Example[] = await pool(windows, 4, async (w) => {
+  const examples: Example[] = await mapLimit(windows, 4, async (w) => {
     const text = w.parts.join('\n')
     // Stage 1: NER, every annotator, per chunk (finest granularity).
     const nerRuns = await Promise.all(
@@ -278,7 +279,7 @@ async function main() {
       const only = args.find((a) => a.startsWith('--model='))?.slice('--model='.length)
       let cells = grid(d).filter(([, m]) => !only || m.includes(only))
       if (flags.has('--reverse')) cells = cells.reverse()
-      await pool(cells, flags.has('--slow') ? 1 : 4, async ([s, m, t]) => {
+      await mapLimit(cells, flags.has('--slow') ? 1 : 4, async ([s, m, t]) => {
         try {
           await runOne(d, s, m, t)
         } catch (err) {

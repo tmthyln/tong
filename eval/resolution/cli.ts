@@ -15,7 +15,8 @@ import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { neuronsToUsd } from '../../server/lib/extraction/llm'
 import { extractEntitiesBatch, removeOverlaps, ENTITY_BATCH_CHUNKS, type NodeTypeInput } from '../../server/lib/entity-extraction'
-import { clients, pool, slug } from '../common/workers-ai'
+import { clients, slug } from '../common/workers-ai'
+import { mapLimit } from '../../server/lib/map-limit'
 import { DATA_DIR, douluoRawDocs, loadCorpus, loadGold, sanguoRawDocs, surfaceForms, mentionContext, type Corpus, type Doc } from './datasets'
 import { COREF_STRATEGIES, LINK_STRATEGIES, E2E_STRATEGIES, type CorefOutput, type LinkOutput, type E2EOutput, type Cost } from './strategies'
 import { scoreCoref, scoreLinking, scoreE2E, type CorefScore, type LinkScore, type E2EScore } from './metrics'
@@ -42,7 +43,7 @@ async function build(name: string) {
   for (const d of raw) {
     const batches: number[][] = []
     for (let i = 0; i < d.chunks.length; i += ENTITY_BATCH_CHUNKS) batches.push(d.chunks.slice(i, i + ENTITY_BATCH_CHUNKS).map((c) => c.order))
-    const perBatch = await pool(batches, 4, (orders) =>
+    const perBatch = await mapLimit(batches, 4, (orders) =>
       extractEntitiesBatch(orders.map((o) => d.chunks[o].content), nodeTypes, env, { client }),
     )
     const mentions = batches.flatMap((orders, bi) =>
@@ -177,7 +178,7 @@ async function main() {
     for (const c of corpora) {
       const cells = grid().filter(([, s, m]) => (!only || m.includes(only)) && (!strat || s === strat))
       // Spread models across workers so one model's rate limit doesn't stall the rest.
-      await pool(cells, Number(process.env.EVAL_CELL_CONCURRENCY ?? 4), async ([t, s, m]) => {
+      await mapLimit(cells, Number(process.env.EVAL_CELL_CONCURRENCY ?? 4), async ([t, s, m]) => {
         try {
           await runOne(c, t, s, m, flags.has('--force'))
         } catch (err) {

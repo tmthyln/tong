@@ -13,8 +13,9 @@ import { createServer } from 'node:http'
 import { createHash } from 'node:crypto'
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { clients, pool } from '../common/workers-ai'
-import { embedTexts } from '../../server/lib/embedding'
+import { clients } from '../common/workers-ai'
+import { mapLimit } from '../../server/lib/map-limit'
+import { embedTexts, type EmbeddingTask } from '../../server/lib/embedding'
 import type { ChatMessage } from '../../server/lib/extraction/llm'
 import { DATA_DIR } from './corpus'
 import { isRateLimit } from '../../server/lib/workers-ai-bridge'
@@ -45,7 +46,7 @@ export function restEnv(): Env {
 }
 
 /** Embed with the production embedder, cached per text. */
-export async function embedCached(texts: string[], task: 'document' | 'clustering'): Promise<number[][]> {
+export async function embedCached(texts: string[], task: EmbeddingTask): Promise<number[][]> {
   const env = restEnv()
   const out: number[][] = new Array(texts.length)
   const missing: number[] = []
@@ -58,7 +59,7 @@ export async function embedCached(texts: string[], task: 'document' | 'clusterin
   })
   const batches: number[][] = []
   for (let i = 0; i < missing.length; i += 50) batches.push(missing.slice(i, i + 50))
-  await pool(batches, 4, async (b) => {
+  await mapLimit(batches, 4, async (b) => {
     const vecs = await embedTexts(env, b.map((i) => texts[i]), task)
     b.forEach((i, k) => {
       out[i] = vecs[k]

@@ -24,7 +24,7 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { createHash } from 'node:crypto'
-import { pool } from '../common/workers-ai'
+import { mapLimit } from '../../server/lib/map-limit'
 import { chatCached, embedCached, RESULTS_DIR } from './bridge'
 import { DATA_DIR, type CorpusChunk } from './corpus'
 
@@ -182,7 +182,7 @@ export async function judgeRun(run: Run, chunks: CorpusChunk[], vectors: number[
   for (const [li, layer] of run.layers.entries()) {
     const seed = layer.map((e) => e.members[0]).join(',')
     const tasks = layer.map((e, k) => ({ e, k }))
-    const scored = await pool(tasks, 6, async ({ e, k }) => {
+    const scored = await mapLimit(tasks, 6, async ({ e, k }) => {
       const rates = await Promise.all(JUDGES.map((j) => safe(() => rate(j, e, texts))))
       const matches = layer.length >= 3 ? await Promise.all(JUDGES.map((j) => safe(() => match(j, layer, k, texts, seed)))) : []
       // Judge-free discriminability: nearest label among this layer's labels.

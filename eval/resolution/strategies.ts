@@ -199,7 +199,7 @@ const legacyCoref: CorefStrategy = {
   },
 }
 
-function formsCoref(name: string, description: string, opts: res.CorefOptions): CorefStrategy {
+function formsCoref(name: string, description: string, opts: Omit<res.CorefOptions, 'model'>): CorefStrategy {
   return {
     name,
     description,
