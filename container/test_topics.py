@@ -45,7 +45,7 @@ def make_fake_namer():
         )
         return httpx.Response(200, json={"content": content})
 
-    client = WorkersAIClient(base_url="http://workers-ai.tong", client=httpx.Client(transport=httpx.MockTransport(handler)))
+    client = WorkersAIClient(base_url="http://workers-ai.tong", transport=httpx.MockTransport(handler))
     return WorkersAINamer(client), client
 
 
@@ -73,7 +73,7 @@ def test_translate_labels_failure_returns_blanks():
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={"content": "not json at all"})
 
-    client = WorkersAIClient(base_url="http://workers-ai.tong", client=httpx.Client(transport=httpx.MockTransport(handler)))
+    client = WorkersAIClient(base_url="http://workers-ai.tong", transport=httpx.MockTransport(handler))
     assert translate_labels(["唐诗", "宋词"], client) == ["", ""]
 
 

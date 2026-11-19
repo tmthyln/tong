@@ -3,6 +3,7 @@
  * pipeline (container/topics.py) runs unmodified against any Workers AI model.
  *
  *   POST /m/<model>/chat   {messages, temperature, max_tokens} → {content}
+ *   POST /fresh/m/<model>/chat   same, bypassing the response cache (timing runs)
  *   POST /m/<model>/embed  {texts} → {vectors}   (embeddinggemma-2, 'clustering' task)
  *
  * Responses are cached on disk (keyed by model + request) so reruns are free and
@@ -16,17 +17,19 @@ import { clients, pool } from '../common/workers-ai'
 import { embedTexts } from '../../server/lib/embedding'
 import type { ChatMessage } from '../../server/lib/extraction/llm'
 import { DATA_DIR } from './corpus'
+import { isRateLimit } from '../../server/lib/workers-ai-bridge'
 
 export const RESULTS_DIR = join(process.cwd(), 'eval/topics/results')
 const CACHE = join(DATA_DIR, 'cache')
 
 const sha = (x: unknown) => createHash('sha256').update(JSON.stringify(x)).digest('hex').slice(0, 24)
 
-function cached<T>(kind: string, key: unknown, make: () => Promise<T>): Promise<T> {
+/** fresh: skip the cache read (still write) — for timing runs. */
+function cached<T>(kind: string, key: unknown, make: () => Promise<T>, fresh = false): Promise<T> {
   const dir = join(CACHE, kind)
   mkdirSync(dir, { recursive: true })
   const path = join(dir, sha(key) + '.json')
-  if (existsSync(path)) return Promise.resolve(JSON.parse(readFileSync(path, 'utf8')) as T)
+  if (!fresh && existsSync(path)) return Promise.resolve(JSON.parse(readFileSync(path, 'utf8')) as T)
   return make().then((v) => (writeFileSync(path, JSON.stringify(v)), v))
 }
 
@@ -66,13 +69,13 @@ export async function embedCached(texts: string[], task: 'document' | 'clusterin
   return out
 }
 
-export async function chatCached(model: string, messages: ChatMessage[], temperature: number, maxTokens: number, tag: string): Promise<string> {
+export async function chatCached(model: string, messages: ChatMessage[], temperature: number, maxTokens: number, tag: string, fresh = false): Promise<string> {
   const { client } = clients()
   return cached('chat', { model, messages, temperature, maxTokens }, async () => {
     const r = await client.chat({ model, messages, temperature, maxCompletionTokens: maxTokens, json: false })
     logUsage({ kind: 'chat', tag, model, neurons: r.usage.neurons, prompt: r.usage.promptTokens, completion: r.usage.completionTokens, ms: r.latencyMs, finish: r.finishReason })
     return r.content ?? ''
-  })
+  }, fresh)
 }
 
 export function serveBridge(port: number) {
@@ -82,19 +85,21 @@ export function serveBridge(port: number) {
       res.end(JSON.stringify(body))
     }
     try {
-      const m = /^\/m\/([^/]+)\/(chat|embed)$/.exec(req.url ?? '')
+      const m = /^\/(fresh\/)?m\/([^/]+)\/(chat|embed)$/.exec(req.url ?? '')
       if (req.method !== 'POST' || !m) return send(404, { error: 'not found' })
-      const model = decodeURIComponent(m[1])
+      const model = decodeURIComponent(m[2])
       let raw = ''
       for await (const c of req) raw += c
       const body = JSON.parse(raw) as { messages?: ChatMessage[]; temperature?: number; max_tokens?: number; texts?: string[] }
-      if (m[2] === 'embed') return send(200, { vectors: await embedCached(body.texts ?? [], 'clustering') })
+      if (m[3] === 'embed') return send(200, { vectors: await embedCached(body.texts ?? [], 'clustering') })
       // Same defaults as the production bridge.
-      const content = await chatCached(model, body.messages ?? [], body.temperature ?? 0.4, body.max_tokens ?? 1024, 'namer')
+      const content = await chatCached(model, body.messages ?? [], body.temperature ?? 0.4, body.max_tokens ?? 1024, 'namer', !!m[1])
       send(200, { content })
     } catch (err) {
       console.error(err)
-      send(500, { error: err instanceof Error ? err.message : String(err) })
+      const message = err instanceof Error ? err.message : String(err)
+      // Same status mapping as the production bridge.
+      send(isRateLimit(message) ? 429 : 500, { error: message })
     }
   })
   server.listen(port, '127.0.0.1', () => console.log(`bridge on http://127.0.0.1:${port}`))

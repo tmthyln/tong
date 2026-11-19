@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from 'vitest'
 import {
   handleWorkersAiRequest,
+  isRateLimit,
   TOPIC_NAMING_MODEL,
 } from './workers-ai-bridge'
 import { EMBEDDING_MODEL } from './embedding'
@@ -90,6 +91,16 @@ describe('handleWorkersAiRequest routing', () => {
       makeEnv(vi.fn())
     )
     expect(res.status).toBe(405)
+  })
+
+  it('429s when Workers AI rate-limits the model', async () => {
+    const run = vi.fn().mockRejectedValue(new Error('AiError: rate limiting: inference request per min rate reached (3021)'))
+    const res = await handleWorkersAiRequest(
+      post('/chat', { messages: [{ role: 'user', content: 'hi' }] }),
+      makeEnv(run)
+    )
+    expect(res.status).toBe(429)
+    expect(isRateLimit('3040: Out of capacity')).toBe(false)
   })
 
   it('500s when AI.run keeps throwing', async () => {

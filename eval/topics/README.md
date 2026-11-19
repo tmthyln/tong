@@ -23,6 +23,12 @@ A mixed library of about 1,000 chunks from 60 documents, chunked with the app's 
 - zh Wikisource, Traditional: 西遊記 ch. 1–6, 紅樓夢 ch. 1–5, 論語 篇 1–7, 孫子兵法.
 - The 斗罗大陆 and 三國演義 chapters from `eval/resolution`.
 
+`run.py` flags: `--max-features N` sets the keyphrase cap (default: production's
+`KEYPHRASE_MAX_FEATURES`; runs made before the cap existed are uncapped);
+`--fresh` bypasses the bridge's response cache, for timing runs and for repeat
+runs of a configuration (naming samples at temperature 0.4, so repeats measure
+run-to-run noise); `--tag` suffixes the run name.
+
 `data/` and `results/` are gitignored. UMAP runs once with the container's
 parameters and is cached (`data/coords.npy`), so every model names the same
 clusters.
@@ -46,4 +52,6 @@ glm-5.3) on a seeded sample of its cluster's passages.
   - *embed*: judge-free. The share of a cluster's chunks whose nearest label in that
     layer (embeddinggemma-2) is the cluster's own.
 - **cost**: billed neurons at $0.011 / 1,000 for the naming calls of one full run.
-  LLM time is the sum of call latencies; production makes these calls one at a time.
+  LLM time is the sum of call latencies. Wall time is bounded by the model's rate
+  limit: paid-plan models (glm-5.3-flash, kimi) allow 20 requests/min per account,
+  and a run makes ~110 naming calls.

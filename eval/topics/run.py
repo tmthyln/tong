@@ -57,19 +57,25 @@ class CountingClient(WorkersAIClient):
         self.calls += 1
         return super().chat(*a, **kw)
 
+    async def achat(self, *a, **kw):
+        self.calls += 1
+        return await super().achat(*a, **kw)
+
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("model")
     ap.add_argument("--bridge", default="http://127.0.0.1:8790")
-    ap.add_argument("--max-features", type=int, help="cap the keyphrase vocabulary (default: toponymy's 50,000)")
+    ap.add_argument("--max-features", type=int, help="cap the keyphrase vocabulary (default: topics.KEYPHRASE_MAX_FEATURES)")
+    ap.add_argument("--fresh", action="store_true", help="bypass the bridge's response cache (timing runs)")
+    ap.add_argument("--tag", help="suffix for the run name, e.g. async")
     args = ap.parse_args()
 
     chunks = json.loads((DATA / "corpus.json").read_text())
     vectors = np.asarray(json.loads((DATA / "vectors.json").read_text()), dtype=np.float32)
     coords = umap_coords(vectors, [c["doc"] for c in chunks])
 
-    client = CountingClient(base_url=f"{args.bridge}/m/{quote(args.model, safe='')}")
+    client = CountingClient(base_url=f"{args.bridge}/{'fresh/' if args.fresh else ''}m/{quote(args.model, safe='')}")
     # Same instruction as container/app.py.
     namer = WorkersAINamer(client, llm_specific_instructions="The topic name must be written in Simplified Chinese.")
     t = time.time()
@@ -78,7 +84,7 @@ def main():
     layers = compute_topics([c["text"] for c in chunks], vectors, coords, namer, WorkersAIEmbedder(client), include_members=True, keyphrase_options=kp)
     secs = time.time() - t
     RESULTS.mkdir(parents=True, exist_ok=True)
-    name = args.model + (f"#kp{args.max_features}" if args.max_features else "")
+    name = args.model + (f"#kp{args.max_features}" if args.max_features else "") + (f"#{args.tag}" if args.tag else "")
     out = {"model": name, "seconds": secs, "calls": client.calls, "started": started, "ended": int(time.time() * 1000), "layers": layers}
     (RESULTS / f"{slug(name)}.json").write_text(json.dumps(out, ensure_ascii=False))
     print(f"{args.model}: {sum(len(l) for l in layers)} labels in {len(layers)} layers, {client.calls} calls, {secs:.0f}s")

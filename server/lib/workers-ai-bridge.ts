@@ -43,8 +43,15 @@ export async function handleWorkersAiRequest(request: Request, env: Env): Promis
     return Response.json({ error: 'not found' }, { status: 404 })
   } catch (err) {
     const message = err instanceof Error ? err.message : 'workers-ai bridge failure'
-    return Response.json({ error: message }, { status: 500 })
+    // Paid-plan models allow 20 requests/min per account; say so with a 429 so
+    // the container waits out the window instead of burning quick retries.
+    return Response.json({ error: message }, { status: isRateLimit(message) ? 429 : 500 })
   }
+}
+
+/** Workers AI error 3021: "rate limiting: inference request per min rate reached". */
+export function isRateLimit(message: string): boolean {
+  return /\b3021\b|rate limit/i.test(message)
 }
 
 async function handleChat(request: Request, env: Env): Promise<Response> {
